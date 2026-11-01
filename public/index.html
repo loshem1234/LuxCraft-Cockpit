@@ -1,1 +1,97 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121210">
+  <meta name="robots" content="noindex, nofollow">
+  <title>LuxCraft Cockpit</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/vendor/chart.umd.js"></script>
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form id="loginForm" class="login-card" autocomplete="on">
+      <div class="brand big"><span class="mark"></span><div><b>LUXCRAFT</b><small>Business Cockpit</small></div></div>
+      <label>Password<input type="password" id="loginPw" autocomplete="current-password" required></label>
+      <label id="codeRow" class="hidden">Authenticator code<input id="loginCode" inputmode="numeric" autocomplete="one-time-code" placeholder="123456 or a recovery code"></label>
+      <button class="btn primary" type="submit">Open cockpit</button>
+      <p id="loginErr" class="err"></p>
+    </form>
+  </div>
 
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand"><span class="mark"></span><div><b>LUXCRAFT</b><small>Cockpit</small></div></div>
+      <nav class="tabs" id="tabs">
+        <button data-tab="overview" class="active"><i>◧</i><span>Overview</span></button>
+        <button data-tab="financials"><i>$</i><span>Financials</span></button>
+        <button data-tab="jobs"><i>⌂</i><span>Jobs</span></button>
+        <button data-tab="taxes"><i>§</i><span>Taxes</span></button>
+        <button data-tab="productivity"><i>✓</i><span>Daily</span></button>
+        <button data-tab="settings"><i>⚙</i><span>Settings</span></button>
+      </nav>
+      <div class="top-actions">
+        <button class="btn sm ask-btn" id="askBtn"><span>Ask</span></button>
+        <button class="icon-btn approvals-btn" id="approvalsBtn" title="Changes waiting for your approval">✓<b></b></button>
+        <button class="icon-btn" id="themeBtn" title="Switch light / dark">☀</button>
+        <button class="icon-btn" id="logoutBtn" title="Log out">⏻</button>
+      </div>
+    </header>
+
+    <main id="main">
+      <section id="tab-overview" class="tab active"></section>
+      <section id="tab-financials" class="tab">
+        <div class="subtabs" id="finSubtabs">
+          <button data-sub="ledger" class="active">Ledger</button>
+          <button data-sub="invoices">Invoices</button>
+          <button data-sub="bank">Bank import</button>
+          <button data-sub="mileage">Mileage</button>
+          <button data-sub="charts">Charts</button>
+        </div>
+        <div id="fin-ledger" class="sub active"></div>
+        <div id="fin-invoices" class="sub"></div>
+        <div id="fin-bank" class="sub"></div>
+        <div id="fin-mileage" class="sub"></div>
+        <div id="fin-charts" class="sub"></div>
+      </section>
+      <section id="tab-jobs" class="tab"></section>
+      <section id="tab-taxes" class="tab"></section>
+      <section id="tab-productivity" class="tab"></section>
+      <section id="tab-settings" class="tab"></section>
+    </main>
+
+    <aside class="drawer hidden" id="drawer" aria-label="Assistant">
+      <div class="drawer-head"><div class="row grow" id="drawerHead"></div>
+        <button class="icon-btn autoread" title="Read replies aloud">🔈</button>
+        <button class="icon-btn" id="drawerClear" title="Clear this chat">⌫</button>
+        <button class="icon-btn" id="drawerClose" title="Close">✕</button></div>
+      <div class="drawer-body chat-body" id="drawerBody"></div>
+    </aside>
+
+    <button class="fab" id="fab" title="Quick add">+</button>
+    <div class="fab-menu hidden" id="fabMenu">
+      <button data-quick="receipt">📷 Snap receipt</button>
+      <button data-quick="expense">− Expense</button>
+      <button data-quick="income">+ Income / check</button>
+      <button data-quick="hours">⏱ Hours</button>
+      <button data-quick="miles">🛻 Miles</button>
+    </div>
+    <input type="file" id="receiptInput" accept="image/*,application/pdf" hidden>
+    <input type="file" id="invoiceInput" accept="application/pdf,image/*" hidden>
+
+    <div class="modal-wrap hidden" id="modalWrap"><div class="modal" id="modal"></div></div>
+    <div class="toast hidden" id="toast"></div>
+  </div>
+
+  <script src="/js/core.js"></script>
+  <script src="/js/agent.js"></script>
+  <script src="/js/pages-money.js"></script>
+  <script src="/js/pages-more.js"></script>
+  <script src="/js/boot.js"></script>
+</body>
+</html>
