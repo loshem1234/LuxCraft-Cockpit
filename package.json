@@ -1,0 +1,23 @@
+{
+  "name": "luxcraft-cockpit",
+  "version": "2.0.0",
+  "description": "LuxCraft Renovations business cockpit: books, jobs, taxes and a team of approval-first AI specialists",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "express": "^4.21.2",
+    "mammoth": "^1.13.0",
+    "multer": "^2.5.0",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.13.1",
+    "qrcode": "^1.5.4"
+  }
+}
