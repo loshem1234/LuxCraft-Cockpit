@@ -270,7 +270,7 @@ state.pages['fin-invoices'] = async function renderInvoices() {
   $('#backupInput').addEventListener('change', async (e) => {
     const file = e.target.files[0]; if (!file) return;
     const fd = new FormData(); fd.append('file', file);
-    try { const r = await api('/api/invoices/import-backup', { method: 'POST', body: fd }); toast(`Imported ${r.invoices} invoices, ${r.estimates} estimates, ${r.payments_added} payments`); refreshAfterChange(); } catch (err) { fail(err); }
+    try { const r = await api('/api/invoices/import-backup', { method: 'POST', body: fd }); toast(`Imported ${r.invoices} invoices, ${r.estimates} estimates, ${r.payments_added} payments${r.renamed && r.renamed.length ? ` · duplicate numbers kept as ${r.renamed.join(', ')}` : ''}${r.skipped && r.skipped.length ? ` · skipped ${r.skipped.length}: ${r.skipped.join('; ')}` : ''}`, !!(r.skipped && r.skipped.length)); refreshAfterChange(); } catch (err) { fail(err); }
   });
   $$('[data-pay]', el).forEach((b) => b.addEventListener('click', () => {
     const i = inv.find((x) => x.id === Number(b.dataset.pay));
