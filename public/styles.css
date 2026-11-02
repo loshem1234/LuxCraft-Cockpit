@@ -322,3 +322,4 @@ body.drawer-open .fab { right: 422px; } body.drawer-open .fab-menu { right: 422p
 .li > div[style*="text-align:right"] { min-width: 130px; }
 .agent-form label:last-child { align-self: end; }
 @media (max-width: 760px) { body[data-tab="productivity"] .fab, body[data-tab="productivity"] .fab-menu { display: none; } }
+td.n.awaiting { color: var(--muted); font-style: italic; }
