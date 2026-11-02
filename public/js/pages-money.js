@@ -74,7 +74,9 @@ state.pages['fin-ledger'] = async function renderLedger() {
   const range = f.period === 'custom' ? { from: f.from, to: f.to } : periodRange(f.period);
   const params = new URLSearchParams(Object.entries({ ...range, kind: f.kind, category: f.category, job_id: f.job_id, search: f.search, billable: f.billable }).filter(([, v]) => v));
   const rows = await api('/api/transactions?' + params);
-  const inc = rows.filter((r) => r.kind === 'income').reduce((s, r) => s + r.amount, 0);
+  const inc = rows.filter((r) => r.kind === 'income' && r.category !== AWAITING).reduce((s, r) => s + r.amount, 0);
+  const awaiting = rows.filter((r) => r.category === AWAITING);
+  const awaitingSum = awaiting.reduce((s, r) => s + r.amount, 0);
   const exp = rows.filter((r) => r.kind === 'expense').reduce((s, r) => s + r.amount, 0);
   const qk = state.quickKind || 'expense';
   el.innerHTML = `
@@ -106,10 +108,11 @@ state.pages['fin-ledger'] = async function renderLedger() {
       <input type="search" id="fSearch" placeholder="Search vendor, memo, check #, invoice…" value="${esc(f.search || '')}">
       <a class="btn" href="/api/export/transactions.csv?year=${(range.from || today()).slice(0, 4)}">Export CSV</a>
     </div>
-    <div class="kpis" style="grid-template-columns:repeat(3,minmax(0,1fr))">
-      <div class="kpi"><div class="l">Income</div><div class="v">${money(inc)}</div></div>
+    <div class="kpis" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+      <div class="kpi"><div class="l">Income received</div><div class="v">${money(inc)}</div></div>
+      <div class="kpi"><div class="l">Invoiced, awaiting payment</div><div class="v">${money(awaitingSum)}</div><div class="s">${awaiting.length} invoice${awaiting.length === 1 ? '' : 's'} · not counted until paid</div></div>
       <div class="kpi"><div class="l">Expenses</div><div class="v">${money(exp)}</div></div>
-      <div class="kpi"><div class="l">Net</div><div class="v ${inc - exp < 0 ? 'neg' : ''}">${money(inc - exp)}</div></div>
+      <div class="kpi"><div class="l">Net (received − expenses)</div><div class="v ${inc - exp < 0 ? 'neg' : ''}">${money(inc - exp)}</div></div>
     </div>
     ${f.billable === 'unbilled' && rows.length ? `<div class="callout row" style="justify-content:space-between;margin-bottom:12px"><span>To bill: <b>${money(rows.reduce((s, t) => s + t.amount * (1 + (t.markup_pct || 0) / 100), 0))}</b> including markup.</span><button class="btn sm" id="markBilled">Mark these billed</button></div>` : ''}
     <div class="table-wrap"><table>
@@ -117,12 +120,12 @@ state.pages['fin-ledger'] = async function renderLedger() {
       <tbody>${rows.length ? rows.map((t) => `<tr>
         <td class="mono">${fmtDate(t.date)}</td>
         <td><span class="kind-bar" style="background:var(--${t.kind})"></span>${esc(t.party || '—')}
-          ${t.split_group ? '<span class="tag" title="Part of a split receipt">split</span>' : ''}${t.billable ? `<span class="tag ${t.billed ? '' : 'warn'}">${t.billed ? 'billed' : 'to bill'}${t.markup_pct ? ` +${t.markup_pct}%` : ''}</span>` : ''}${t.untaxed ? '<span class="tag warn" title="No sales tax charged">no tax</span>' : ''}${t.reconciled ? '<span class="tag ok" title="Matched to bank statement">✓ bank</span>' : ''}${t.created_by === 'agent' ? '<span class="tag">agent</span>' : ''}
+          ${t.split_group ? '<span class="tag" title="Part of a split receipt">split</span>' : ''}${t.billable ? `<span class="tag ${t.billed ? '' : 'warn'}">${t.billed ? 'billed' : 'to bill'}${t.markup_pct ? ` +${t.markup_pct}%` : ''}</span>` : ''}${t.untaxed ? '<span class="tag warn" title="No sales tax charged">no tax</span>' : ''}${t.reconciled ? '<span class="tag ok" title="Matched to bank statement">✓ bank</span>' : ''}${t.created_by === 'agent' ? '<span class="tag">agent</span>' : ''}${t.created_by === 'sync' ? (t.category === AWAITING ? '<span class="tag warn" title="Synced from the invoice app">invoice · awaiting payment</span>' : '<span class="tag ok" title="Synced from the invoice app">invoice · paid</span>') : ''}
           ${t.memo ? `<div class="note">${esc(t.memo)}</div>` : ''}</td>
         <td class="hide-sm"><span class="chip ${t.kind}">${esc(t.category)}</span></td>
         <td class="hide-sm">${esc(t.job_name || '')}</td>
         <td class="hide-sm mono">${[t.check_no ? '#' + esc(t.check_no) : '', esc(t.invoice_no || '')].filter(Boolean).join(' · ')}</td>
-        <td class="n">${t.kind === 'expense' ? '−' : '+'}${money(t.amount)}</td>
+        <td class="n ${t.category === AWAITING ? 'awaiting' : ''}">${t.kind === 'expense' ? '−' : '+'}${money(t.amount)}</td>
         <td class="actions">${t.attachment_id ? `<a class="btn sm ghost" href="/api/attachments/${t.attachment_id}" target="_blank" rel="noopener" title="View receipt">🧾</a>` : ''}<button class="btn sm ghost" data-edit="${t.id}">Edit</button></td></tr>`).join('')
         : '<tr><td colspan="7" class="empty">No transactions in this view.</td></tr>'}</tbody>
     </table></div>`;
@@ -165,6 +168,7 @@ function txModal(t = {}, opts = {}) {
     <h2>${isEdit ? 'Edit' : 'New'} ${kind === 'income' ? 'income' : 'expense'}${split ? ' · split' : ''}</h2>
     ${opts.aiNote ? `<div class="ai-note">${opts.aiNote}</div>` : ''}
     ${t.split_group && isEdit ? '<div class="ai-note">This line is one part of a split receipt. Editing changes only this part.</div>' : ''}
+    ${t.created_by === 'sync' && isEdit ? '<div class="ai-note">Synced from the invoice app. The amount, dates and check # follow the invoice on every sync, so change those in the invoice app. Once it is paid, you can change its category here.</div>' : ''}
     <form id="txForm" class="form-grid">
       <label>Date<input type="date" name="date" value="${t.date || today()}" required></label>
       <label>${split ? 'Receipt total' : 'Amount'}<input type="number" name="${split ? 'total' : 'amount'}" step="0.01" min="0.01" value="${t.amount ?? ''}" inputmode="decimal" ${split ? '' : 'required'}></label>
@@ -270,7 +274,7 @@ state.pages['fin-invoices'] = async function renderInvoices() {
   $('#backupInput').addEventListener('change', async (e) => {
     const file = e.target.files[0]; if (!file) return;
     const fd = new FormData(); fd.append('file', file);
-    try { const r = await api('/api/invoices/import-backup', { method: 'POST', body: fd }); toast(`Imported ${r.invoices} invoices, ${r.estimates} estimates · ${r.payments_added} payments added to the ledger${r.ledger_removed ? `, ${r.ledger_removed} removed` : ''}${r.renamed && r.renamed.length ? ` · duplicate numbers kept as ${r.renamed.join(', ')}` : ''}${r.skipped && r.skipped.length ? ` · skipped ${r.skipped.length}: ${r.skipped.join('; ')}` : ''}`, !!(r.skipped && r.skipped.length)); refreshAfterChange(); } catch (err) { fail(err); }
+    try { const r = await api('/api/invoices/import-backup', { method: 'POST', body: fd }); toast(`Imported ${r.invoices} invoices and ${r.estimates} estimates · ledger updated${r.renamed && r.renamed.length ? ` · duplicate numbers kept as ${r.renamed.join(', ')}` : ''}${r.skipped && r.skipped.length ? ` · skipped ${r.skipped.length}: ${r.skipped.join('; ')}` : ''}`, !!(r.skipped && r.skipped.length)); refreshAfterChange(); } catch (err) { fail(err); }
   });
   $$('[data-pay]', el).forEach((b) => b.addEventListener('click', () => {
     const i = inv.find((x) => x.id === Number(b.dataset.pay));

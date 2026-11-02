@@ -1,7 +1,7 @@
 /* LuxCraft Cockpit – core: utilities, API, modal, navigation, charts, login */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-const state = { meta: null, tab: 'overview', sub: 'ledger', ledgerFilter: { period: 'month' }, taxYear: null, chartRange: '12m', charts: {}, pages: {} };
+const state = { meta: null, tab: 'overview', sub: 'ledger', ledgerFilter: { period: 'ytd' }, taxYear: null, chartRange: '12m', charts: {}, pages: {} };
 
 // ---------- utils ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -73,7 +73,9 @@ document.addEventListener('click', (e) => { if (e.target.closest('[data-close]')
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeModal(); closeFab(); } });
 
 // ---------- shared option builders ----------
-const catOptions = (kind, sel) => state.meta.categories.filter((c) => c.active && (!kind || c.kind === kind))
+const AWAITING = 'Invoiced – Awaiting Payment';
+// The awaiting-payment category is managed by invoice sync, so it's only offered on rows that already use it.
+const catOptions = (kind, sel) => state.meta.categories.filter((c) => c.active && (!kind || c.kind === kind) && (c.name !== AWAITING || sel === AWAITING))
   .map((c) => `<option ${c.name === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 const jobOptions = (sel, blank = 'No job') => `<option value="">${blank}</option>` + state.meta.jobs
   .map((j) => `<option value="${j.id}" ${String(j.id) === String(sel) ? 'selected' : ''}>${esc(j.name)}${['complete', 'lost'].includes(j.status) ? ` (${j.status})` : ''}</option>`).join('');
