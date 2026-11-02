@@ -9,10 +9,10 @@ Node 20+ · Express · PostgreSQL · Claude API · Gemini TTS. No build step.
 | Agent | Title | Lives on | Specialty |
 |---|---|---|---|
 | Grace | Chief of Staff | Overview | Whole-business picture, daily briefing, connects the dots |
-| Martin | Bookkeeper | Financials | Categorizing, splits, reimbursable materials, bank reconciliation, cash flow, Ohio sales/use tax |
+| Clara | Bookkeeper | Financials | Categorizing, splits, reimbursable materials, bank reconciliation, cash flow, Ohio sales/use tax |
 | Helen | Tax Specialist | Taxes | Schedule C, SE tax, quarterlies, Ohio BID, Fairborn city & school district tax, 1099s, Section 179, home office |
-| Walt | Project Estimator | Jobs | Fixed-bid pricing from past estimates and actuals, job costing, profit per hour, draws |
-| Hank | Foreman | Daily | Morning check-in, plans for you and helpers, hours per job, goals met |
+| Vera | Project Estimator | Jobs | Fixed-bid pricing from past estimates and actuals, job costing, profit per hour, draws |
+| Rosie | Foreman | Daily | Morning check-in, plans for you and helpers, hours per job, goals met |
 
 - **Approval first.** Agents never change data. Each change they want appears as a card (in the chat, and under the ✓ button in the top bar). Nothing happens until you tap **Approve**.
 - **Shared memory.** Facts you approve ("my day rate is $400") are known by every agent. Manage them in Settings → Agents & knowledge.
@@ -29,7 +29,7 @@ Names, titles, and voices are just defaults: rename anyone.
 - **Financials** – Ledger (quick entry, receipt photo reading, split receipts, client-reimbursable materials with markup, sales tax/no-tax flags), Invoices (synced from the invoice app or uploaded), Bank import (CSV, auto-matching), Mileage, Charts.
 - **Jobs** – Contract vs collected vs cost, budget warnings, your hours and real $/hour, unbilled materials; Estimates with win rate and line items; Crew & hours.
 - **Taxes** – Schedule C line by line incl. home office (Line 30); estimated SE, federal (2026 brackets, QBI), Ohio (business income deduction), Fairborn school district and city tax; quarterly payments; Section 179 purchase planner; 1099-NEC tracker; Ohio sales/use tax.
-- **Daily** – Hank's check-in chat, today's goals by person, hours logged, 3-week history.
+- **Daily** – Rosie's check-in chat, today's goals by person, hours logged, 3-week history.
 - **Settings** – Agents & knowledge, Business, Connections, Security, Categories, Data exports.
 
 ## Deploy on Railway
