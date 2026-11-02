@@ -31,75 +31,125 @@ function invoiceTotal(rec) {
   return r2(sub * (1 + num(st.taxRate) / 100));
 }
 
+// A number can only belong to one record. If another record from the app already uses it
+// (a copied estimate, a hand-edited number), keep both by giving this one a suffix: "EST-1001 (2)".
+async function freeNumber(table, col, wanted, selfId) {
+  // Keep a suffix this record already has, so its number doesn't shuffle between syncs.
+  if (selfId) {
+    const cur = (await q(`SELECT ${col} AS v FROM ${table} WHERE id=$1`, [selfId])).rows[0];
+    const esc = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (cur && new RegExp(`^${esc} \\(\\d+\\)$`, 'i').test(cur.v)) {
+      const taken = (await q(`SELECT 1 FROM ${table} WHERE lower(${col})=lower($1) AND id<>$2`, [wanted, selfId])).rows.length;
+      if (taken) return cur.v;
+    }
+  }
+  let candidate = wanted; let n = 1;
+  for (;;) {
+    const { rows } = await q(`SELECT id FROM ${table} WHERE lower(${col})=lower($1) AND ($2::int IS NULL OR id<>$2) LIMIT 1`, [candidate, selfId || null]);
+    if (!rows.length) return candidate;
+    n += 1; candidate = `${wanted} (${n})`;
+  }
+}
+
+async function importEstimate(rec, source, stats) {
+  const st = rec.st;
+  const extId = `${source}:est:${rec.id}`;
+  const wanted = String(st.estNo || '').trim() || `EST-${String(rec.id).slice(0, 6)}`;
+  const jobName = jobNameFor(st);
+  const jobId = jobName ? await resolveJob(jobName, { create: true, client: st.client?.name || null,
+    status: rec.status === 'accepted' ? 'active' : rec.status === 'declined' ? 'lost' : 'estimating' }) : null;
+  const items = [];
+  for (const sec of st.sections || []) for (const it of sec.items || []) {
+    if (!String(it.desc || '').trim() && !num(it.rate)) continue;
+    items.push({ section: sec.name || '', desc: it.desc, qty: num(it.qty), unit: it.unit, rate: num(it.rate), total: r2(num(it.qty) * num(it.rate)), optional: !!it.optional });
+  }
+  const existing = (await q('SELECT id FROM estimates WHERE external_id=$1', [extId])).rows[0];
+  const estNo = await freeNumber('estimates', 'est_no', wanted, existing && existing.id);
+  if (estNo !== wanted) stats.renamed.push(`${wanted} → ${estNo}`);
+  const vals = [estNo, jobId, st.client?.name || null, st.project || null, toDate(st.estDate), toDate(st.validUntil), num(rec.total),
+    rec.status || 'draft', JSON.stringify(items), st.scope || null];
+  if (existing) {
+    await q(`UPDATE estimates SET est_no=$2, job_id=$3, client=$4, project=$5, est_date=$6, valid_until=$7, total=$8, status=$9, items=$10, scope=$11, updated_at=now() WHERE id=$1`, [existing.id, ...vals]);
+  } else {
+    await q(`INSERT INTO estimates (est_no, job_id, client, project, est_date, valid_until, total, status, items, scope, source, external_id, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())`, [...vals, source, extId]);
+  }
+  if (jobId) {
+    stats.jobs_touched.add(jobId);
+    // An accepted estimate makes the job active with the bid as its contract (unless set by hand).
+    if (rec.status === 'accepted') await q(`UPDATE jobs SET status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END,
+        contract_amount=COALESCE(contract_amount,$2), pricing='fixed', source=COALESCE(source,'estimate') WHERE id=$1`, [jobId, num(rec.total)]);
+    else if (['draft', 'sent'].includes(rec.status)) await q(`UPDATE jobs SET status=CASE WHEN status='lead' THEN 'estimating' ELSE status END WHERE id=$1`, [jobId]);
+    else if (rec.status === 'declined') await q(`UPDATE jobs SET status=CASE WHEN status IN ('lead','estimating') THEN 'lost' ELSE status END WHERE id=$1`, [jobId]);
+  }
+  stats.estimates++;
+}
+
+async function importInvoice(rec, source, stats, groups) {
+  const st = rec.st; const ci = Math.max(0, Math.min(st.currentIdx || 0, (st.draws || []).length - 1));
+  const extId = `${source}:inv:${rec.id}`;
+  const wanted = String(st.invNo).trim();
+  const jobName = jobNameFor(st);
+  const jobId = jobName ? await resolveJob(jobName, { create: true, client: st.client?.name || null }) : null;
+  if (jobId) {
+    stats.jobs_touched.add(jobId);
+    await q(`UPDATE jobs SET contract_amount=COALESCE(contract_amount,$2), status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END WHERE id=$1`, [jobId, num(st.proposal) || null]);
+  }
+  const amount = invoiceTotal(rec);
+  // Same invoice from the app (by its id) → update it. Otherwise, a hand-entered/uploaded invoice with the same
+  // number and no app link is the same invoice → adopt it. Otherwise it's new.
+  let existing = (await q('SELECT id FROM invoices WHERE external_id=$1', [extId])).rows[0];
+  if (!existing) existing = (await q('SELECT id FROM invoices WHERE lower(invoice_no)=lower($1) AND external_id IS NULL', [wanted])).rows[0];
+  const invNo = await freeNumber('invoices', 'invoice_no', wanted, existing && existing.id);
+  if (invNo !== wanted) stats.renamed.push(`${wanted} → ${invNo}`);
+  const vals = [invNo, jobId, st.client?.name || null, toDate(st.invDate), amount, st.draws?.[ci]?.label || null, st.project || null];
+  if (existing) {
+    await q(`UPDATE invoices SET invoice_no=$2, job_id=COALESCE($3, job_id), client=COALESCE($4, client), issue_date=COALESCE($5, issue_date), amount=$6,
+      draw_label=COALESCE($7, draw_label), notes=COALESCE($8, notes), external_id=$9, source=$10 WHERE id=$1`, [existing.id, ...vals, extId, source]);
+  } else {
+    await q(`INSERT INTO invoices (invoice_no, job_id, client, issue_date, amount, draw_label, notes, external_id, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [...vals, extId, source]);
+  }
+  stats.invoices++;
+
+  let pay = null;
+  for (const other of groups[`${jobName}|${num(st.proposal)}`] || []) {
+    const d = other.st.draws?.[ci];
+    if (other.id !== rec.id && (other.st.currentIdx || 0) > ci && d && d.date) { pay = { date: toDate(d.date), check_no: d.ck || null }; break; }
+  }
+  if (!pay && rec.status === 'paid') pay = { date: toDate(st.draws?.[ci]?.date) || toDate(rec.updatedAt) || S.todayISO(), check_no: st.draws?.[ci]?.ck || null };
+  if (pay) {
+    const ref = `${source}:pay:${rec.id}`;
+    const exists = await q('SELECT 1 FROM transactions WHERE ext_ref=$1', [ref]);
+    // Skip if Loshem already logged this check by hand.
+    const manual = await q(`SELECT 1 FROM transactions WHERE kind='income' AND lower(invoice_no)=lower($1) AND (($2::text IS NOT NULL AND check_no=$2) OR abs(amount-$3) < 0.01)`,
+      [invNo, pay.check_no, amount]);
+    if (!exists.rows.length && !manual.rows.length) {
+      await S.addTransaction({ kind: 'income', date: pay.date || S.todayISO(), amount, category: 'Contract Revenue', party: st.client?.name || null, job_id: jobId,
+        method: pay.check_no ? 'check' : null, check_no: pay.check_no, invoice_no: invNo, memo: `${st.draws?.[ci]?.label || 'Draw'} – from invoice app`, ext_ref: ref }, 'sync');
+      stats.payments_added++;
+    }
+  }
+}
+
 async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'invoice-app') {
-  const stats = { invoices: 0, estimates: 0, payments_added: 0, jobs_touched: new Set() };
+  const stats = { invoices: 0, estimates: 0, payments_added: 0, jobs_touched: new Set(), renamed: [], skipped: [] };
+  // One bad record never stops the rest of the sync.
+  const safely = async (label, fn) => {
+    try { await fn(); } catch (e) { stats.skipped.push(`${label}: ${e.message}`); console.error('Invoice-app sync skipped', label, e.message); }
+  };
   // Estimates first so jobs get their bid amount.
   for (const rec of estimates) {
     if (!rec || !rec.id || !rec.st) continue;
-    const st = rec.st;
-    const jobName = jobNameFor(st);
-    const jobId = jobName ? await resolveJob(jobName, { create: true, client: st.client?.name || null,
-      status: rec.status === 'accepted' ? 'active' : rec.status === 'declined' ? 'lost' : 'estimating' }) : null;
-    const items = [];
-    for (const sec of st.sections || []) for (const it of sec.items || []) {
-      if (!String(it.desc || '').trim() && !num(it.rate)) continue;
-      items.push({ section: sec.name || '', desc: it.desc, qty: num(it.qty), unit: it.unit, rate: num(it.rate), total: r2(num(it.qty) * num(it.rate)), optional: !!it.optional });
-    }
-    await q(`INSERT INTO estimates (est_no, job_id, client, project, est_date, valid_until, total, status, items, scope, source, external_id, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
-      ON CONFLICT (external_id) DO UPDATE SET est_no=EXCLUDED.est_no, job_id=EXCLUDED.job_id, client=EXCLUDED.client, project=EXCLUDED.project,
-        est_date=EXCLUDED.est_date, valid_until=EXCLUDED.valid_until, total=EXCLUDED.total, status=EXCLUDED.status, items=EXCLUDED.items, scope=EXCLUDED.scope, updated_at=now()`,
-    [st.estNo, jobId, st.client?.name || null, st.project || null, toDate(st.estDate), toDate(st.validUntil), num(rec.total), rec.status || 'draft',
-      JSON.stringify(items), st.scope || null, source, `${source}:est:${rec.id}`]);
-    if (jobId) {
-      stats.jobs_touched.add(jobId);
-      // An accepted estimate makes the job active with the bid as its contract (unless set by hand).
-      if (rec.status === 'accepted') await q(`UPDATE jobs SET status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END,
-          contract_amount=COALESCE(contract_amount,$2), pricing='fixed', source=COALESCE(source,'estimate') WHERE id=$1`, [jobId, num(rec.total)]);
-      else if (['draft', 'sent'].includes(rec.status)) await q(`UPDATE jobs SET status=CASE WHEN status='lead' THEN 'estimating' ELSE status END WHERE id=$1`, [jobId]);
-      else if (rec.status === 'declined') await q(`UPDATE jobs SET status=CASE WHEN status IN ('lead','estimating') THEN 'lost' ELSE status END WHERE id=$1`, [jobId]);
-    }
-    stats.estimates++;
+    await safely(`Estimate ${rec.st.estNo || rec.id}`, () => importEstimate(rec, source, stats));
   }
-
   // Invoices: each one bills one draw. A draw is "received" when a later invoice on the same
   // contract records its date/check #, or when the invoice itself is marked Paid.
-  const valid = invoices.filter((r) => r && r.id && r.st && r.st.invNo);
+  const valid = invoices.filter((r) => r && r.id && r.st && String(r.st.invNo || '').trim());
   const groups = {};
   for (const r of valid) (groups[`${jobNameFor(r.st)}|${num(r.st.proposal)}`] ||= []).push(r);
-  for (const rec of valid) {
-    const st = rec.st; const ci = Math.min(st.currentIdx || 0, (st.draws || []).length - 1);
-    const jobName = jobNameFor(st);
-    const jobId = jobName ? await resolveJob(jobName, { create: true, client: st.client?.name || null }) : null;
-    if (jobId) {
-      stats.jobs_touched.add(jobId);
-      await q(`UPDATE jobs SET contract_amount=COALESCE(contract_amount,$2), status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END WHERE id=$1`, [jobId, num(st.proposal) || null]);
-    }
-    const amount = invoiceTotal(rec);
-    await S.upsertInvoice({ invoice_no: st.invNo, job_id: jobId, client: st.client?.name || null, issue_date: toDate(st.invDate),
-      amount, draw_label: st.draws?.[ci]?.label || null, notes: st.project || null, external_id: `${source}:inv:${rec.id}` }, source);
-    stats.invoices++;
-
-    let pay = null;
-    for (const other of groups[`${jobName}|${num(st.proposal)}`] || []) {
-      const d = other.st.draws?.[ci];
-      if (other.id !== rec.id && (other.st.currentIdx || 0) > ci && d && d.date) { pay = { date: toDate(d.date), check_no: d.ck || null }; break; }
-    }
-    if (!pay && rec.status === 'paid') pay = { date: toDate(st.draws?.[ci]?.date) || toDate(rec.updatedAt) || S.todayISO(), check_no: st.draws?.[ci]?.ck || null };
-    if (pay) {
-      const ref = `${source}:pay:${rec.id}`;
-      const exists = await q('SELECT 1 FROM transactions WHERE ext_ref=$1', [ref]);
-      // Skip if Loshem already logged this check by hand.
-      const manual = await q(`SELECT 1 FROM transactions WHERE kind='income' AND lower(invoice_no)=lower($1) AND (($2::text IS NOT NULL AND check_no=$2) OR abs(amount-$3) < 0.01)`,
-        [st.invNo, pay.check_no, amount]);
-      if (!exists.rows.length && !manual.rows.length) {
-        await S.addTransaction({ kind: 'income', date: pay.date, amount, category: 'Contract Revenue', party: st.client?.name || null, job_id: jobId,
-          method: pay.check_no ? 'check' : null, check_no: pay.check_no, invoice_no: st.invNo, memo: `${st.draws?.[ci]?.label || 'Draw'} – from invoice app`, ext_ref: ref }, 'sync');
-        stats.payments_added++;
-      }
-    }
-  }
-  return { invoices: stats.invoices, estimates: stats.estimates, payments_added: stats.payments_added, jobs: stats.jobs_touched.size };
+  for (const rec of valid) await safely(`Invoice ${rec.st.invNo}`, () => importInvoice(rec, source, stats, groups));
+  return { invoices: stats.invoices, estimates: stats.estimates, payments_added: stats.payments_added, jobs: stats.jobs_touched.size,
+    renamed: stats.renamed, skipped: stats.skipped };
 }
 
 // ---------- bank / card CSV ----------
