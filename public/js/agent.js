@@ -102,7 +102,7 @@ function Chat(root, agentId, { embedded = false } = {}) {
   const typing = (label) => { const t = document.createElement('div'); t.className = 'typing'; t.textContent = label; log.appendChild(t); scroll(); return t; };
   async function load() {
     const msgs = await api(`/api/agents/${agentId}/messages`);
-    log.innerHTML = msgs.length ? '' : `<p class="note intro">${esc(a.name)} is your ${esc(a.title)}. Ask anything, or tell them what happened – they'll suggest the changes and you approve them.</p>`;
+    log.innerHTML = msgs.length ? '' : `<p class="note intro">${esc(a.name)} is your ${esc(a.title)}. Ask anything, or tell her what happened – she'll suggest the changes and you approve them.</p>`;
     msgs.forEach(add); scroll();
   }
   async function send(text) {
