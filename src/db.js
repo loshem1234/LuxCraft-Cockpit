@@ -267,6 +267,7 @@ const CATEGORIES = [
   ['Materials Reimbursement', 'income', 'L1', 'Client paying you back for materials you bought for their job', 2],
   ['Other Business Income', 'income', 'L6', 'Scrap sales, rebates, misc.', 3],
   ['Owner Contribution', 'income', 'NONE', 'Your own money put into the business (not taxable income)', 4],
+  ['Invoiced – Awaiting Payment', 'income', 'NONE', 'Billed to a client and not paid yet. Synced from invoices; becomes Contract Revenue when paid. Not counted as revenue or taxed until paid.', 5],
   ['Materials', 'expense', 'COGS', 'Lumber, drywall, tile, fixtures that go into client jobs', 10],
   ['Subcontractors', 'expense', 'L11', 'Subs and helpers paid on 1099 (tracked for 1099-NEC)', 11],
   ['Equipment Rental', 'expense', 'L20a', 'Rented machinery, lifts, trailers', 14],

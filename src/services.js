@@ -5,7 +5,8 @@ const { q, pool, getSettings, resolveJob } = require('./db');
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const todayISO = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const NOT_OPERATING = "('Owner Draw','Estimated Tax Payment')";
-const NOT_REVENUE = "('Owner Contribution')";
+const AWAITING = 'Invoiced – Awaiting Payment';
+const NOT_REVENUE = "('Owner Contribution','Invoiced – Awaiting Payment')";
 
 function yearValue(map, year) {
   if (map && typeof map === 'object') {
@@ -105,9 +106,9 @@ async function listTransactions({ from, to, kind, category, job_id, search, bill
 async function listInvoices({ status } = {}) {
   const { rows } = await q(`
     SELECT i.*, j.name AS job_name,
-      COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.kind='income' AND lower(t.invoice_no)=lower(i.invoice_no)),0) AS paid,
+      COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.kind='income' AND t.category<>'Invoiced – Awaiting Payment' AND lower(t.invoice_no)=lower(i.invoice_no)),0) AS paid,
       (SELECT json_agg(json_build_object('id',t.id,'date',t.date,'amount',t.amount,'check_no',t.check_no,'method',t.method) ORDER BY t.date)
-         FROM transactions t WHERE t.kind='income' AND lower(t.invoice_no)=lower(i.invoice_no)) AS payments
+         FROM transactions t WHERE t.kind='income' AND t.category<>'Invoiced – Awaiting Payment' AND lower(t.invoice_no)=lower(i.invoice_no)) AS payments
     FROM invoices i LEFT JOIN jobs j ON j.id=i.job_id ORDER BY i.issue_date DESC NULLS LAST, i.id DESC`);
   const today = todayISO();
   const out = rows.map((r) => {
@@ -277,7 +278,7 @@ async function taxSummary(year) {
   const from = `${year}-01-01`; const to = `${year}-12-31`;
   const byCat = await q(
     `SELECT t.kind, t.category, COALESCE(c.sched_c,'L27a') AS sched_c, SUM(t.amount) AS total, COUNT(*) AS n
-     FROM transactions t LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN $1 AND $2 GROUP BY 1,2,3 ORDER BY 3,2`, [from, to]);
+     FROM transactions t LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN $1 AND $2 AND t.category<>'Invoiced – Awaiting Payment' GROUP BY 1,2,3 ORDER BY 3,2`, [from, to]);
   const lines = {}; const notDeducted = [];
   const vehicleStandard = settings.vehicle_method !== 'actual';
   for (const r of byCat.rows) {
@@ -458,7 +459,7 @@ async function overview() {
 }
 
 module.exports = {
-  round2, todayISO, mileageRateFor, addTransaction, updateTransaction, addSplit, listTransactions, listInvoices, upsertInvoice,
+  AWAITING, round2, todayISO, mileageRateFor, addTransaction, updateTransaction, addSplit, listTransactions, listInvoices, upsertInvoice,
   listEstimates, listJobs, upsertJob, addMileage, listMileage, addTimeEntries, listTimeEntries, taxSummary, estimateTaxes,
   analytics, periodSummary, overview, LINE_LABELS,
 };
