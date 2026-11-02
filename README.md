@@ -73,7 +73,11 @@ The invoice app keeps its data in the browser, so the browser sends it here:
 2. Cockpit → **Settings → Connections**: enter the invoice app's address, create a connection key.
 3. Invoice app → **Settings → LuxCraft Cockpit**: paste the Cockpit address and key on each device you use.
 
-Every save then syncs. Each invoice bills one draw; a draw is recorded as paid when a later invoice on the same contract records its date/check #, or when the invoice is marked Paid. Estimates come across with their line items; accepted estimates set the job's contract and make it active. Jobs are named "Client · Project". You can also upload the app's **Export backup** files on the Invoices tab.
+Every save then syncs. Estimates come across with their line items; accepted estimates set the job's contract and make it active. Jobs are named "Client · Project".
+
+**Payments go into the ledger automatically, exactly as the invoice app shows them.** The newest invoice on a contract holds the payment history: each earlier draw with its paid date and check # becomes one Contract Revenue entry, for the amount that draw's invoice billed (including change-order items and tax) and tagged with that invoice's number. If an invoice is marked Paid, its own draw is recorded too, dated the day it was marked Paid. Correct a date, check # or amount in the invoice app and the ledger entry follows on the next sync; clear a payment there and the synced entry is removed. Checks you already logged by hand (same invoice # plus the same check # or amount) are left alone and not doubled. Synced entries can be re-categorized in the Cockpit; their amount, date and check # always follow the invoice app.
+
+You can also upload the app's **Export backup** files on the Invoices tab.
 
 ## How the money flows
 
