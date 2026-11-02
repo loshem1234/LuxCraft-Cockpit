@@ -75,7 +75,11 @@ The invoice app keeps its data in the browser, so the browser sends it here:
 
 Every save then syncs. Estimates come across with their line items; accepted estimates set the job's contract and make it active. Jobs are named "Client · Project".
 
-**Payments go into the ledger automatically, exactly as the invoice app shows them.** The newest invoice on a contract holds the payment history: each earlier draw with its paid date and check # becomes one Contract Revenue entry, for the amount that draw's invoice billed (including change-order items and tax) and tagged with that invoice's number. If an invoice is marked Paid, its own draw is recorded too, dated the day it was marked Paid. Correct a date, check # or amount in the invoice app and the ledger entry follows on the next sync; clear a payment there and the synced entry is removed. Checks you already logged by hand (same invoice # plus the same check # or amount) are left alone and not doubled. Synced entries can be re-categorized in the Cockpit; their amount, date and check # always follow the invoice app.
+**Every invoice goes into the income ledger automatically, linked to its invoice – no double entry.**
+- When an invoice syncs, it appears in the ledger right away for its exact amount (including change orders and tax), dated the invoice date, as **Invoiced – Awaiting Payment**. Awaiting rows show in the ledger and "Owed to you" but are not counted as revenue or taxed.
+- When the invoice app shows the draw received (the paid date and check # on the next invoice's draw schedule, or the invoice marked Paid), the same row becomes **Contract Revenue**, dated the paid date with the check #.
+- Change an amount, date or check # in the invoice app and the row follows on the next sync; delete an invoice there and its row is removed. One invoice is always one row, so the two apps can't drift apart.
+- If you record a check for an invoice by hand in the Cockpit, your entry counts and the synced row steps aside, so nothing is counted twice.
 
 You can also upload the app's **Export backup** files on the Invoices tab.
 
