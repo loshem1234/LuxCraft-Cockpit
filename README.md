@@ -65,29 +65,18 @@ Tables, categories and defaults are created on first start.
 - The invoice app connects with a revocable key that can only add invoices/estimates, accepted only from that app's address.
 - Agents can't change anything without your approval, and can't touch security settings.
 
-## Connecting the invoice & estimate app
+## The invoice & estimate app (built in)
 
-The invoice app keeps its data in the browser, so the browser sends it here:
+The LuxCraft invoice and estimate app runs inside the Cockpit on the **Invoicing** tab – the same screens and PDFs as before, unchanged. The only difference is where it saves: straight into the Cockpit's database instead of the browser. So:
 
-1. Deploy the updated invoice app (adds `public/cockpit-sync.js`).
-2. Cockpit → **Settings → Connections**: enter the invoice app's address, create a connection key.
-3. Invoice app → **Settings → LuxCraft Cockpit**: paste the Cockpit address and key on each device you use.
+- **Enter everything once.** Each save immediately updates invoices, estimates, projects, draw schedules, the income ledger, taxes, and what every agent sees. There's no sync, no connection key, and it's the same on every device you log in from.
+- **One project per lot.** Each invoice and estimate belongs to a project keyed by client + lot number (read from the project/site lines, e.g. "Lot 262"), named like "Lot 262 · Full Interior Carpentry Package". Without a lot number, the job-site address is used. Two lots with the same project name stay separate.
+- **The agents read the invoices themselves:** client, project, lot, site, scope, every draw's description and share, change-order items, tax, terms and notes (with bank/routing/account numbers hidden). Ask them about "LC-41" or "Lot 262" without explaining anything.
+- **Paid means you marked it.** A draw is paid when you press the invoice's Paid button in Saved invoices (dated the day you pressed it) or enter its check # on a later invoice (dated with the paid date you enter there).
+- **Two windows at once are safe.** Each window sends only the invoices it changed, so one window never undoes another's edits.
+- Files: `public/invoice-app/` holds the app (only its three script lines differ from the standalone repo), `public/invoice-app/cockpit-store.js` points its saving at the Cockpit, `src/books.js` stores it and refreshes everything.
 
-Every save then syncs. Estimates come across with their line items; accepted estimates set the job's contract and make it active. Jobs are named "Client · Project".
-
-**Contracts and draws.** All invoices for the same client + project are one contract (one job). The newest invoice carries the draw schedule, and the Cockpit keeps that schedule on the job: each draw is **Paid**, **Billed, unpaid** (or **Overdue**), or **Scheduled**, with its invoice #, amount (draw + change-order items + tax), dates and check #. The job shows contract total (including change orders), collected, owed, and still to bill.
-
-**You decide what's paid.** A draw counts as paid only when you mark its invoice **Paid** in the invoice app, or enter its **check #** on a later invoice's draw schedule. The paid date you enter there is used; without one, it's dated the day you marked it Paid. A billed draw that isn't marked paid stays owed – even if a later invoice prints it under "Paid to date" – and the Cockpit flags it so you can mark it.
-
-**Every billed draw is in the income ledger, linked to its invoice – no double entry.**
-- Billed and unpaid: **Invoiced – Awaiting Payment**, dated the invoice date, for the exact invoice amount. Counted in "Owed to you", not as revenue or taxed.
-- Paid: the same row becomes **Contract Revenue**, dated the paid date with the check #.
-- Scheduled draws that haven't been billed appear as "Still to bill", not in the ledger.
-- Due dates come from the invoice terms ("Net 30" → 30 days). "Due upon receipt" invoices count as overdue after the grace days in Settings → Business (default 14).
-- Edit or delete an invoice in the invoice app and the Cockpit follows on the next sync (deleted invoices are voided, not erased). Mark payments in the invoice app; synced invoices aren't edited in the Cockpit, so the two can't drift apart.
-- The Cockpit doesn't store invoice notes or payment instructions (e.g. wire/bank details printed on the invoice).
-
-You can also upload the app's **Export backup** files on the Invoices tab.
+**Moving over from the standalone app:** open the old app, use **Settings → Export backup** on its Invoices page and on its Estimates page, then on the Cockpit's Invoicing tab use **Settings → Import backup** with each file (Invoices page for the invoices file, Estimates page for the estimates file). After that, retire the old app – it no longer syncs.
 
 ## How the money flows
 
