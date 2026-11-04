@@ -254,7 +254,7 @@ state.pages['fin-invoices'] = async function renderInvoices() {
   const inv = state.showVoid ? all : all.filter((i) => i.status !== 'void');
   const unpaid = inv.filter((i) => ['open', 'partial', 'overdue'].includes(i.status));
   el.innerHTML = `
-    <div class="page-head"><div><h2>Invoices</h2><div class="sub-title">Synced from your invoice app. A check logged with the invoice # is applied automatically.</div></div>
+    <div class="page-head"><div><h2>Invoices</h2><div class="sub-title">From the Invoicing tab – every save shows here right away. Mark draws Paid there.</div></div>
       <div class="row"><button class="btn" id="invBackup" title="Upload the invoice or estimate app's Export backup file">⇪ Import app backup</button><button class="btn" id="invUpload">⇪ Upload PDF</button><button class="btn primary" id="invNew">New invoice</button></div></div>
     <div class="kpis">
       <div class="kpi accent"><div class="l">Outstanding</div><div class="v">${money(unpaid.reduce((a, i) => a + i.balance, 0))}</div><div class="s">${unpaid.length} invoices</div></div>
@@ -270,7 +270,7 @@ state.pages['fin-invoices'] = async function renderInvoices() {
         <td class="n">${money(i.amount)}${(i.items_total || i.tax) ? `<div class="note">${money(i.draw_amount)} draw${i.items_total ? ` + ${money(i.items_total)} items` : ''}${i.tax ? ` + ${money(i.tax)} tax` : ''}</div>` : ''}</td><td class="n hide-sm" title="${esc((i.payments || []).map((p) => `${p.date} ${money(p.amount)}${p.check_no ? ' #' + p.check_no : ''}`).join('\n'))}">${money(i.paid)}</td>
         <td class="n"><b>${money(i.balance)}</b></td><td><span class="chip ${i.status}">${i.status}</span>${i.days_out > 0 && !['paid', 'void'].includes(i.status) ? `<div class="note">${i.days_out}d out</div>` : ''}</td>
         <td class="actions">${i.source === 'invoice-app' ? (!['paid', 'void'].includes(i.status) ? '<span class="note" title="Mark the invoice Paid in the invoice app (or enter the check # on the next invoice) and it updates here on the next sync.">Mark Paid in invoice app</span>' : '') : !['paid', 'void'].includes(i.status) ? `<button class="btn sm" data-pay="${i.id}">Record check</button>` : ''}${i.attachment_id ? `<a class="btn sm ghost" href="/api/attachments/${i.attachment_id}" target="_blank" rel="noopener">📄</a>` : ''}${i.source === 'invoice-app' ? '' : `<button class="btn sm ghost" data-ie="${i.id}">Edit</button>`}</td></tr>`).join('')
-        : '<tr><td colspan="9" class="empty">No invoices yet. Connect your invoice app in Settings → Connections, import its backup file, or upload a PDF.</td></tr>'}</tbody></table></div>
+        : '<tr><td colspan="9" class="empty">No invoices yet. Create them on the Invoicing tab, or import the old app\'s backup file.</td></tr>'}</tbody></table></div>
     ${voided.length ? `<p class="note"><button class="link" id="toggleVoid">${state.showVoid ? 'Hide' : 'Show'} ${voided.length} voided / deleted in the invoice app</button></p>` : ''}
     <input type="file" id="backupInput" accept="application/json,.json" hidden>`;
   $('#invNew').addEventListener('click', () => invoiceModal());
@@ -455,3 +455,14 @@ state.pages['fin-charts'] = async function renderCharts() {
   options: { plugins: { tooltip: { callbacks: { afterLabel: (c) => { const p = a.productivity[c.dataIndex]; return ` Goals ${p.done_n}/${p.goals_n} · ${p.met || 'not reviewed'}`; } } } } } });
   makeChart('c7', { type: 'bar', data: { labels: dows, datasets: [{ label: 'Income', data: dows.map((_, i) => (a.weekdays.find((w) => w.dow === i) || { income: 0 }).income), ...barStyle(th.income) }] } });
 };
+
+// ================= INVOICING (the built-in invoice & estimate app) =================
+state.pages.invoicing = function renderInvoicing() {
+  const f = $('#invoiceFrame');
+  if (!f.getAttribute('src')) f.setAttribute('src', '/invoice-app/');
+};
+// Every save in the invoice app updates the Cockpit's numbers; refresh the badge counts and whichever page is open next.
+window.addEventListener('message', (e) => {
+  if (e.origin !== location.origin || !e.data || e.data.type !== 'lc-books-saved') return;
+  loadMeta().catch(() => {});
+});

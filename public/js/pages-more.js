@@ -121,7 +121,7 @@ async function renderEstimates(el, head) {
     ${ests.length ? ests.map((e) => `<tr class="clickable" data-est="${e.id}"><td class="mono"><b>${esc(e.est_no)}</b></td><td>${esc(e.client || '')}<div class="note">${esc(e.project || '')}</div></td>
       <td class="hide-sm mono">${fmtDate(e.est_date)}${e.valid_until && e.valid_until < today() && ['draft', 'sent'].includes(e.status) ? '<div class="note neg">expired</div>' : ''}</td><td class="n">${money(e.total)}</td>
       <td><span class="chip ${e.status === 'accepted' ? 'paid' : e.status === 'declined' ? 'overdue' : 'open'}">${e.status}</span></td></tr>`).join('')
-      : '<tr><td colspan="5" class="empty">Estimates arrive from your invoice app once it\'s connected (Settings → Connections), or import its estimates backup on the Invoices tab.</td></tr>'}</tbody></table></div>`;
+      : '<tr><td colspan="5" class="empty">Estimates you write on the Invoicing tab appear here automatically.</td></tr>'}</tbody></table></div>`;
   wireSubnav(el, 'jobsSub', state.pages.jobs);
   $$('[data-est]', el).forEach((r) => r.addEventListener('click', () => {
     const e = ests.find((x) => x.id === Number(r.dataset.est));
@@ -420,15 +420,11 @@ async function setConnections(body) {
   const tokens = sec.tokens.filter((t) => t.scope === 'invoice-app');
   body.innerHTML = `<div class="grid g2">
     <div class="card"><h3>LuxCraft invoice & estimate app</h3>
-      ${tokens.length ? `<div class="list">${tokens.map((t) => `<div class="li"><div><b>${esc(t.label)}</b><div class="meta">${esc(t.origin || 'any origin')} · ${t.last_used ? `last synced ${new Date(t.last_used).toLocaleString()}` : 'not used yet'}</div></div><button class="btn sm ghost danger" data-revoke="${t.id}">Disconnect</button></div>`).join('')}</div>` : '<p class="note">Not connected yet.</p>'}
-      <ol class="steps"><li>Deploy the updated invoice app (it adds a small "Cockpit" box to its Settings).</li><li>Enter the invoice app's web address below and create a connection key.</li><li>Paste the key into the invoice app's Settings → Cockpit, on each device you use it from. Every save then syncs here automatically.</li></ol>
-      <form id="tokForm" class="row"><input name="origin" placeholder="https://your-invoice-app.up.railway.app" required style="min-width:260px"><button class="btn primary">Create connection key</button></form>
-      <p class="note">The key can only add invoices and estimates – it can't read your books. Disconnect it here any time.</p></div>
+      <p><span class="chip paid">built in</span> The invoice and estimate app now lives on the <button class="link" data-go="invoicing">Invoicing</button> tab and saves straight into the Cockpit, so there's nothing to connect or sync.</p>
+      <p class="note">Moving over from the old standalone app: open it, use <b>Settings → Export backup</b> on both its Invoices and Estimates pages, then in the Invoicing tab use <b>Settings → Import backup</b> with each file (or upload them on Financials → Invoices → Import app backup).</p>
+      ${tokens.length ? `<p class="note">Old standalone-app connection keys (no longer used):</p><div class="list">${tokens.map((t) => `<div class="li"><div><b>${esc(t.label)}</b><div class="meta">${esc(t.origin || 'any origin')} · ${t.last_used ? `last used ${new Date(t.last_used).toLocaleString()}` : 'never used'}</div></div><button class="btn sm ghost danger" data-revoke="${t.id}">Remove</button></div>`).join('')}</div>` : ''}</div>
     <div class="card"><h3>Website leads</h3><p class="note">Ready for later: once the website is updated, it can send new leads here and they'll appear on the Jobs tab as leads. Create a key for it then.</p><button class="btn" id="leadTok">Create website key</button></div></div>`;
-  $('#tokForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try { const { token } = await api('/api/security/tokens', { method: 'POST', body: { scope: 'invoice-app', label: 'Invoice app', origin: e.target.origin.value } }); showToken(token); } catch (err) { fail(err); }
-  });
+  wireGoTo(body);
   $('#leadTok').addEventListener('click', async () => { try { const { token } = await api('/api/security/tokens', { method: 'POST', body: { scope: 'leads', label: 'Website leads' } }); showToken(token); } catch (err) { fail(err); } });
   $$('[data-revoke]', body).forEach((b) => b.addEventListener('click', async () => { if (confirm('Disconnect? That app will stop syncing until you create a new key.')) { await api(`/api/security/tokens/${b.dataset.revoke}`, { method: 'DELETE' }); setConnections(body); } }));
   function showToken(token) {

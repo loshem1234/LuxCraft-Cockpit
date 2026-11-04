@@ -134,7 +134,7 @@ async function boot() {
 }
 
 // ---------- navigation ----------
-const PAGE_AGENT = { overview: 'home', financials: 'financials', jobs: 'jobs', taxes: 'taxes', productivity: 'daily', settings: 'home' };
+const PAGE_AGENT = { overview: 'home', invoicing: 'financials', financials: 'financials', jobs: 'jobs', taxes: 'taxes', productivity: 'daily', settings: 'home' };
 $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
 $('#finSubtabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-sub]'); if (b) { state.sub = b.dataset.sub; showTab('financials'); } });
 function showTab(tab, push = true) {
