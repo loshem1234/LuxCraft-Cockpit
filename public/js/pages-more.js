@@ -1,4 +1,25 @@
 /* LuxCraft Cockpit – Jobs, Taxes, Daily, Settings */
+// Contract progress bar: paid | billed & unpaid | scheduled.
+function drawBar(j) {
+  const t = j.contract_total || 0; if (!t) return '';
+  const paid = Math.min(100, (j.income / t) * 100); const owed = Math.min(100 - paid, (j.owed / t) * 100);
+  return `<div class="progress thin stack" title="${money0(j.income)} paid · ${money0(j.owed)} billed, unpaid · ${money0(j.to_bill)} still to bill"><span style="width:${paid}%"></span><span class="owed" style="width:${owed}%"></span></div>`;
+}
+// The draw schedule laid out like the invoice: #, description, share, amount, status.
+function drawScheduleHtml(j) {
+  const st = (d) => d.status === 'paid'
+    ? `<span class="chip paid">Paid</span> <span class="note">${d.paid_date ? fmtDate(d.paid_date) : ''}${d.check_no ? ` · check #${esc(d.check_no)}` : ''}${d.note ? esc(d.note.replace(' · ', ' · ')) : ''}</span>`
+    : d.status === 'billed'
+      ? `<span class="chip ${d.due_date && d.due_date < today() ? 'overdue' : 'open'}">${d.due_date && d.due_date < today() ? 'Overdue' : 'Billed, unpaid'}</span> <span class="note">${fmtDate(d.issue_date)}${d.due_date ? ` · due ${fmtDate(d.due_date)}` : ''}</span>`
+      : '<span class="chip">Scheduled</span>';
+  const total = j.draws.reduce((a, d) => a + d.amount, 0);
+  return `<h3>Draw schedule</h3><div class="table-wrap"><table><thead><tr><th>#</th><th>Description</th><th class="n">Share</th><th class="n">Amount</th><th>Invoice</th><th>Status</th></tr></thead><tbody>
+    ${j.draws.map((d) => `<tr><td>${d.n}</td><td>${esc(d.label)}${d.flag ? `<div class="note warn-text">⚠ ${esc(d.flag)}</div>` : ''}</td><td class="n">${d.pct !== null ? `${+d.pct.toFixed(2)}%` : ''}</td>
+      <td class="n">${money(d.billed_amount ?? d.amount)}${d.billed_amount && Math.abs(d.billed_amount - d.amount) > 0.005 ? `<div class="note">${money(d.amount)} draw${d.items ? ` + ${money(d.items)} items` : ''}${d.tax ? ` + ${money(d.tax)} tax` : ''}</div>` : ''}</td>
+      <td class="mono">${esc(d.invoice_no || '—')}</td><td>${st(d)}</td></tr>`).join('')}
+    <tr class="tfoot"><td></td><td>Contract amount</td><td class="n">100%</td><td class="n">${money(total)}</td><td></td><td></td></tr></tbody></table></div>
+    <p class="note">Draws count as paid when you mark the invoice Paid in the invoice app, or enter its check # on a later invoice.</p>`;
+}
 const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
 const subnav = (key, items, cur) => `<div class="subtabs" data-subnav="${key}">${items.map(([v, l]) => `<button type="button" data-v="${v}" class="${cur === v ? 'active' : ''}">${l}</button>`).join('')}</div>`;
 function wireSubnav(el, key, fn) { $$(`[data-subnav="${key}"] button`, el).forEach((b) => b.addEventListener('click', () => { state[key] = b.dataset.v; fn(); })); }
@@ -19,25 +40,27 @@ state.pages.jobs = async function renderJobs() {
   el.innerHTML = `${head}
     <div class="kpis">
       <div class="kpi accent"><div class="l">Active jobs</div><div class="v">${active.length}</div><div class="s">${money0(active.reduce((a, j) => a + (j.contract_amount || 0), 0))} under contract</div></div>
-      <div class="kpi"><div class="l">Left to collect</div><div class="v">${money0(active.reduce((a, j) => a + Math.max(0, (j.contract_amount || 0) - j.income), 0))}</div><div class="s">on active jobs</div></div>
+      <div class="kpi"><div class="l">Billed, not paid</div><div class="v">${money0(jobs.reduce((a, j) => a + j.owed, 0))}</div><div class="s">unpaid draws</div></div>
+      <div class="kpi"><div class="l">Still to bill</div><div class="v">${money0(active.reduce((a, j) => a + j.to_bill, 0))}</div><div class="s">scheduled draws on active jobs</div></div>
       <div class="kpi"><div class="l">Unbilled materials</div><div class="v">${money0(jobs.reduce((a, j) => a + j.unbilled, 0))}</div><div class="s">incl. markup</div></div>
       <div class="kpi"><div class="l">Avg. margin (done)</div><div class="v">${pct(avg(done.map((j) => j.margin)))}</div><div class="s">${done.length} completed jobs</div></div>
     </div>
     <div class="filters"><select id="jStatus">${[['open', 'Open jobs'], ['all', 'All jobs'], ['lead', 'Leads'], ['estimating', 'Estimating'], ['active', 'Active'], ['complete', 'Complete'], ['lost', 'Lost']].map(([v, l]) => `<option value="${v}" ${(state.jobFilter || 'open') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Job</th><th>Status</th><th class="n">Contract</th><th class="n">Collected</th><th class="n hide-sm">Costs</th><th class="n">Profit</th><th class="n hide-sm">Your hrs</th><th class="n">$/hr</th><th></th></tr></thead>
+      <thead><tr><th>Job</th><th>Status</th><th class="n">Contract</th><th class="n">Collected</th><th class="n">Owed</th><th class="n hide-sm">To bill</th><th class="n hide-sm">Costs</th><th class="n">Profit</th><th class="n hide-sm">Your hrs</th><th class="n">$/hr</th><th></th></tr></thead>
       <tbody>${jobs.filter((j) => { const f = state.jobFilter || 'open'; return f === 'all' || (f === 'open' ? !['complete', 'lost'].includes(j.status) : j.status === f); }).map((j) => {
         const budgetPct = j.budget_cost ? j.total_cost / j.budget_cost : null;
         return `<tr class="clickable" data-job="${j.id}">
-        <td><b>${esc(j.name)}</b><div class="note">${esc(j.client || '')}${j.estimate ? ` · ${esc(j.estimate.est_no)} ${money0(j.estimate.total)}` : ''}${j.unbilled ? ` · <span class="down">${money0(j.unbilled)} to bill</span>` : ''}</div>
-          ${j.contract_amount ? `<div class="progress thin" title="${pct(j.income / j.contract_amount)} collected"><span style="width:${Math.min(100, (j.income / j.contract_amount) * 100)}%"></span></div>` : ''}</td>
+        <td><b>${esc(j.name)}</b><div class="note">${esc(j.client || '')}${j.estimate ? ` · ${esc(j.estimate.est_no)} ${money0(j.estimate.total)}` : ''}${j.unbilled ? ` · <span class="down">${money0(j.unbilled)} materials to bill</span>` : ''}${j.draws_total ? ` · ${j.draws_paid} of ${j.draws_total} draws paid` : ''}</div>
+          ${j.contract_total ? drawBar(j) : ''}${j.draw_flags.length ? `<div class="note warn-text">⚠ ${esc(j.draw_flags[0])}</div>` : ''}</td>
         <td><span class="chip">${j.status}</span>${budgetPct !== null && budgetPct > 0.9 ? `<div class="note ${budgetPct > 1 ? 'neg' : ''}">${pct(budgetPct)} of budget</div>` : ''}</td>
-        <td class="n">${j.contract_amount ? money0(j.contract_amount) : '—'}</td><td class="n">${money0(j.income)}</td>
+        <td class="n">${j.contract_total ? money0(j.contract_total) : '—'}${j.change_orders ? `<div class="note">incl. ${money0(j.change_orders)} change orders</div>` : ''}</td><td class="n">${money0(j.income)}</td>
+        <td class="n ${j.owed ? 'down' : ''}">${j.owed ? money0(j.owed) : '—'}</td><td class="n hide-sm">${j.to_bill ? money0(j.to_bill) : '—'}</td>
         <td class="n hide-sm" title="${j.vehicle_cost ? `incl. ${money(j.vehicle_cost)} mileage` : ''}">${money0(j.total_cost)}</td>
         <td class="n ${j.profit < 0 ? 'neg' : ''}"><b>${money0(j.profit)}</b><div class="note">${pct(j.margin)}</div></td>
         <td class="n hide-sm">${j.my_hours || '—'}${j.crew_hours ? `<div class="note">+${j.crew_hours} crew</div>` : ''}</td><td class="n">${j.per_hour !== null ? money0(j.per_hour) : '—'}</td>
         <td class="actions"><button class="btn sm ghost" data-je="${j.id}">Edit</button></td></tr>`;
-      }).join('') || '<tr><td colspan="9" class="empty">No jobs here yet.</td></tr>'}</tbody></table></div>`;
+      }).join('') || '<tr><td colspan="11" class="empty">No jobs here yet.</td></tr>'}</tbody></table></div>`;
   wireSubnav(el, 'jobsSub', renderJobs);
   $('#jobNew').addEventListener('click', () => jobModal());
   $('#jobHours').addEventListener('click', () => hoursModal());
@@ -52,10 +75,11 @@ async function jobDetail(j, walt) {
   openModal(`<div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(j.name)}</h2><span class="chip">${j.status}</span></div>
     <p class="note">${esc(j.client || '')}${j.address ? ' · ' + esc(j.address) : ''}</p>
     <div class="kpis" style="grid-template-columns:repeat(4,minmax(0,1fr))">
-      <div class="kpi"><div class="l">Contract</div><div class="v">${money0(j.contract_amount)}</div><div class="s">${est ? `${esc(est.est_no)} ${money0(est.total)}` : 'no estimate'}</div></div>
-      <div class="kpi"><div class="l">Collected</div><div class="v">${money0(j.income)}</div><div class="s">${money0(myInv.reduce((s, i) => s + i.balance, 0))} still owed</div></div>
+      <div class="kpi"><div class="l">Contract</div><div class="v">${money0(j.contract_total)}</div><div class="s">${j.change_orders ? `${money0(j.contract_amount)} + ${money0(j.change_orders)} change orders` : est ? `${esc(est.est_no)} ${money0(est.total)}` : 'no estimate'}</div></div>
+      <div class="kpi"><div class="l">Collected</div><div class="v">${money0(j.income)}</div><div class="s">${money0(j.owed)} billed & unpaid · ${money0(j.to_bill)} still to bill</div></div>
       <div class="kpi"><div class="l">Costs</div><div class="v">${money0(j.total_cost)}</div><div class="s">${j.budget_cost ? `budget ${money0(j.budget_cost)}` : 'no budget set'}</div></div>
       <div class="kpi accent"><div class="l">Profit</div><div class="v">${money0(j.profit)}</div><div class="s">${j.per_hour !== null ? `${money0(j.per_hour)}/hr over ${j.my_hours} hrs` : 'log hours to see $/hr'}</div></div></div>
+    ${j.draws && j.draws.length ? drawScheduleHtml(j) : ''}
     <h3>Money</h3>${tx.length ? miniTable(['Date', 'What', 'Category', 'Amount'], tx.map((t) => [fmtDate(t.date), t.party || t.memo || '', t.category, `${t.kind === 'expense' ? '−' : '+'}${money(t.amount)}`])) : '<p class="note">Nothing tagged to this job yet.</p>'}
     <h3 style="margin-top:14px">Hours</h3>${time.length ? miniTable(['Date', 'Who', 'Hours', 'Note'], time.map((t) => [fmtDate(t.date), t.worker, t.hours, t.note || ''])) : '<p class="note">No hours logged.</p>'}
     ${myInv.length ? `<h3 style="margin-top:14px">Invoices</h3>${miniTable(['Invoice', 'Draw', 'Amount', 'Balance'], myInv.map((i) => [i.invoice_no, i.draw_label || '', money(i.amount), money(i.balance)]))}` : ''}
@@ -386,6 +410,7 @@ function setBusiness(body) {
     <label>Monthly revenue goal<input type="number" name="goal_monthly_revenue" value="${s.goal_monthly_revenue || ''}"></label>
     <label>Daily $ target<input type="number" name="daily_target" value="${s.daily_target || ''}"></label>
     <label>Default markup on client materials %<input type="number" step="0.5" name="default_markup_pct" value="${s.default_markup_pct || ''}"></label>
+    <label>"Due upon receipt" overdue after (days)<input type="number" min="0" name="receipt_grace_days" value="${s.receipt_grace_days ?? 14}"></label>
   </form><p class="note">Tax assumptions (filing status, rates, mileage) live on the Taxes tab under Assumptions.</p>
   <div class="foot"><button class="btn primary" id="bizSave">Save</button></div></div>`;
   $('#bizSave').addEventListener('click', async () => { await api('/api/settings', { method: 'PUT', body: formData($('#bizForm')) }); toast('Saved'); loadMeta(); });

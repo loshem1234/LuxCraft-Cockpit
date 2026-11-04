@@ -24,9 +24,11 @@ state.pages.overview = async function renderOverview() {
       <div class="kpi"><div class="l">Expenses · this month</div><div class="v">${money0(o.month.expense)}</div><div class="s">${o.month.top_expenses[0] ? `Top: ${esc(o.month.top_expenses[0].category)}` : 'Nothing logged yet'}</div></div>
       <div class="kpi"><div class="l">Profit · this month</div><div class="v ${o.month.profit < 0 ? 'neg' : ''}">${money0(o.month.profit)}</div><div class="s">YTD ${money0(o.ytd.profit)}${o.ytd.my_hours ? ` · ${money0(o.ytd.profit / o.ytd.my_hours)}/hr` : ''}</div></div>
       <div class="kpi"><div class="l">Owed to you</div><div class="v">${money0(o.receivables.total)}</div><div class="s">${o.receivables.count} open${o.receivables.overdue ? ` · <span class="down">${o.receivables.overdue} overdue</span>` : ''}${o.unbilled ? ` · ${money0(o.unbilled)} unbilled materials` : ''}</div></div>
+      <div class="kpi"><div class="l">Still to bill</div><div class="v">${money0(o.backlog.to_bill)}</div><div class="s">scheduled draws · ${o.backlog.jobs} active job${o.backlog.jobs === 1 ? '' : 's'}</div></div>
       <div class="kpi"><div class="l">Tax set-aside left</div><div class="v">${money0(Math.max(0, o.tax.remaining))}</div><div class="s">${o.tax.next_deadline ? `${o.tax.next_deadline.q} due ${fmtDate(o.tax.next_deadline.due)}` : ''}</div></div>
       <div class="kpi"><div class="l">Last 7 days</div><div class="v">${money0(o.week.est_earned)}</div><div class="s">est. earned · goals met ${o.week.days_met}/${o.week.days_judged || 0} days</div></div>
     </div>
+    ${o.backlog.flags.length ? `<div class="callout" style="margin-bottom:14px"><b>Check your Paid marks:</b> ${o.backlog.flags.map(esc).join(' · ')}</div>` : ''}
     <div class="grid g-main">
       <div class="card"><h3>Income vs expenses · 12 months</h3>${legend([[th.income, 'Income'], [th.expense, 'Expenses']])}<div class="chart-box"><canvas id="ovChart"></canvas></div></div>
       <div class="card"><div class="row" style="justify-content:space-between"><h3>Today's plan</h3><button class="link" data-go="productivity">Open</button></div>
@@ -247,7 +249,9 @@ $('#receiptInput').addEventListener('change', async (e) => {
 // ================= INVOICES =================
 state.pages['fin-invoices'] = async function renderInvoices() {
   const el = $('#fin-invoices');
-  const inv = await api('/api/invoices');
+  const all = await api('/api/invoices');
+  const voided = all.filter((i) => i.status === 'void');
+  const inv = state.showVoid ? all : all.filter((i) => i.status !== 'void');
   const unpaid = inv.filter((i) => ['open', 'partial', 'overdue'].includes(i.status));
   el.innerHTML = `
     <div class="page-head"><div><h2>Invoices</h2><div class="sub-title">Synced from your invoice app. A check logged with the invoice # is applied automatically.</div></div>
@@ -260,15 +264,17 @@ state.pages['fin-invoices'] = async function renderInvoices() {
     <div class="table-wrap"><table>
       <thead><tr><th>Invoice</th><th>Client / job</th><th class="hide-sm">Issued</th><th class="hide-sm">Due</th><th class="n">Amount</th><th class="n hide-sm">Paid</th><th class="n">Balance</th><th>Status</th><th></th></tr></thead>
       <tbody>${inv.length ? inv.map((i) => `<tr>
-        <td class="mono"><b>${esc(i.invoice_no)}</b>${i.source !== 'manual' ? ' <span class="tag">synced</span>' : ''}${i.draw_label ? `<div class="note">${esc(i.draw_label)}</div>` : ''}</td>
+        <td class="mono"><b>${esc(i.invoice_no)}</b>${i.source !== 'manual' ? ' <span class="tag">synced</span>' : ''}${i.draw_no ? `<div class="note">Draw ${i.draw_no} of ${i.draw_count}${i.draw_label ? ` · ${esc(i.draw_label)}` : ''}</div>` : i.draw_label ? `<div class="note">${esc(i.draw_label)}</div>` : ''}</td>
         <td>${esc(i.client || '')}<div class="note">${esc(i.job_name || '')}</div></td>
-        <td class="hide-sm mono">${fmtDate(i.issue_date)}</td><td class="hide-sm mono">${fmtDate(i.due_date)}</td>
-        <td class="n">${money(i.amount)}</td><td class="n hide-sm" title="${esc((i.payments || []).map((p) => `${p.date} ${money(p.amount)}${p.check_no ? ' #' + p.check_no : ''}`).join('\n'))}">${money(i.paid)}</td>
-        <td class="n"><b>${money(i.balance)}</b></td><td><span class="chip ${i.status}">${i.status}</span>${i.days_out !== null && !['paid', 'void'].includes(i.status) ? `<div class="note">${i.days_out}d out</div>` : ''}</td>
-        <td class="actions">${!['paid', 'void'].includes(i.status) ? `<button class="btn sm" data-pay="${i.id}">Record check</button>` : ''}${i.attachment_id ? `<a class="btn sm ghost" href="/api/attachments/${i.attachment_id}" target="_blank" rel="noopener">📄</a>` : ''}<button class="btn sm ghost" data-ie="${i.id}">Edit</button></td></tr>`).join('')
+        <td class="hide-sm mono">${fmtDate(i.issue_date)}</td><td class="hide-sm mono">${fmtDate(i.due_date)}${i.terms ? `<div class="note">${esc(i.terms)}</div>` : ''}</td>
+        <td class="n">${money(i.amount)}${(i.items_total || i.tax) ? `<div class="note">${money(i.draw_amount)} draw${i.items_total ? ` + ${money(i.items_total)} items` : ''}${i.tax ? ` + ${money(i.tax)} tax` : ''}</div>` : ''}</td><td class="n hide-sm" title="${esc((i.payments || []).map((p) => `${p.date} ${money(p.amount)}${p.check_no ? ' #' + p.check_no : ''}`).join('\n'))}">${money(i.paid)}</td>
+        <td class="n"><b>${money(i.balance)}</b></td><td><span class="chip ${i.status}">${i.status}</span>${i.days_out > 0 && !['paid', 'void'].includes(i.status) ? `<div class="note">${i.days_out}d out</div>` : ''}</td>
+        <td class="actions">${i.source === 'invoice-app' ? (!['paid', 'void'].includes(i.status) ? '<span class="note" title="Mark the invoice Paid in the invoice app (or enter the check # on the next invoice) and it updates here on the next sync.">Mark Paid in invoice app</span>' : '') : !['paid', 'void'].includes(i.status) ? `<button class="btn sm" data-pay="${i.id}">Record check</button>` : ''}${i.attachment_id ? `<a class="btn sm ghost" href="/api/attachments/${i.attachment_id}" target="_blank" rel="noopener">📄</a>` : ''}${i.source === 'invoice-app' ? '' : `<button class="btn sm ghost" data-ie="${i.id}">Edit</button>`}</td></tr>`).join('')
         : '<tr><td colspan="9" class="empty">No invoices yet. Connect your invoice app in Settings → Connections, import its backup file, or upload a PDF.</td></tr>'}</tbody></table></div>
+    ${voided.length ? `<p class="note"><button class="link" id="toggleVoid">${state.showVoid ? 'Hide' : 'Show'} ${voided.length} voided / deleted in the invoice app</button></p>` : ''}
     <input type="file" id="backupInput" accept="application/json,.json" hidden>`;
   $('#invNew').addEventListener('click', () => invoiceModal());
+  $('#toggleVoid')?.addEventListener('click', () => { state.showVoid = !state.showVoid; state.pages['fin-invoices'](); });
   $('#invUpload').addEventListener('click', () => $('#invoiceInput').click());
   $('#invBackup').addEventListener('click', () => $('#backupInput').click());
   $('#backupInput').addEventListener('change', async (e) => {
