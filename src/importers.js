@@ -14,11 +14,50 @@ const toDate = (v) => {
 
 // ---------- LuxCraft invoice app ----------
 // Job identity is client + project, the same on estimates and invoices, so both land on one job.
-function jobNameFor(st) {
-  const client = String(st.client?.name || '').trim();
-  const project = String(st.project || '').trim();
-  return (project ? `${client} · ${project}` : client).slice(0, 120) || null;
+// ---------- projects: one per lot ----------
+const clean = (x) => String(x || '').replace(/\s+/g, ' ').trim();
+// Lot number from the project/site lines (e.g. "Lot 262", "Lot #12B", "LOT 7").
+function lotOf(st) {
+  for (const f of [st.site1, st.site2, st.project, st.client?.a1, st.client?.a2]) {
+    const m = clean(f).match(/\blot\s*#?\s*([A-Za-z0-9-]+)/i);
+    if (m) return m[1].toUpperCase();
+  }
+  return null;
 }
+const siteOf = (st) => [st.site1, st.site2].map(clean).filter(Boolean).join(', ') || [st.client?.a1, st.client?.a2].map(clean).filter(Boolean).join(', ') || null;
+// Identity: client + lot; without a lot, client + job site address; without that, client + project.
+function jobKeyFor(st) {
+  const client = clean(st.client?.name).toLowerCase();
+  const lot = lotOf(st);
+  if (lot) return `${client}|lot:${lot}`;
+  const site = clean(st.site1 || '').toLowerCase();
+  if (site) return `${client}|site:${site}`;
+  return `${client}|project:${clean(st.project).toLowerCase()}`;
+}
+function jobNameFor(st) {
+  const lot = lotOf(st); const project = clean(st.project); const client = clean(st.client?.name);
+  if (lot) return [`Lot ${lot}`, project || client].filter(Boolean).join(' · ').slice(0, 120);
+  return (project ? `${project} · ${client}` : client || 'Untitled job').slice(0, 120);
+}
+// Find or create the project for an invoice/estimate. Name clashes (same lot # for two clients) get the client added.
+async function jobFor(st, { status = 'active' } = {}) {
+  const key = jobKeyFor(st);
+  if (!clean(st.client?.name) && !clean(st.project) && !lotOf(st)) return null;
+  const found = (await q('SELECT id FROM jobs WHERE ext_key=$1', [key])).rows[0];
+  const client = clean(st.client?.name) || null; const lot = lotOf(st); const site = siteOf(st);
+  if (found) {
+    await q('UPDATE jobs SET client=COALESCE($2, client), lot=$3, address=COALESCE($4, address) WHERE id=$1', [found.id, client, lot, site]);
+    return found.id;
+  }
+  let name = jobNameFor(st);
+  if ((await q('SELECT 1 FROM jobs WHERE lower(name)=lower($1)', [name])).rows.length) name = `${name} · ${client || key}`.slice(0, 150);
+  for (let n = 2; (await q('SELECT 1 FROM jobs WHERE lower(name)=lower($1)', [name])).rows.length; n++) name = `${jobNameFor(st)} (${n})`;
+  const { rows } = await q(`INSERT INTO jobs (name, client, address, status, pricing, source, ext_key, lot) VALUES ($1,$2,$3,$4,'fixed','invoice-app',$5,$6) RETURNING id`,
+    [name, client, site, status, key, lot]);
+  return rows[0].id;
+}
+// Bank/routing/account numbers never leave the invoice: long digit runs are hidden in what the Cockpit keeps.
+const redact = (t) => String(t || '').replace(/\d[\d\s-]{5,}\d/g, '[number hidden]');
 function drawAmounts(st) {
   const proposal = num(st.proposal);
   return (st.draws || []).map((d) => r2(st.mode === 'pct' ? proposal * num(d.val) / 100 : num(d.val)));
@@ -51,13 +90,39 @@ async function freeNumber(table, col, wanted, selfId) {
   }
 }
 
+// Everything written on the invoice / estimate, kept for the agents' brief (bank numbers hidden).
+function invoiceDetails(st, rec) {
+  const amounts = drawAmounts(st);
+  return {
+    invoice_no: st.invNo, invoice_date: toDate(st.invDate), terms: st.terms || null, status_in_app: rec.status || 'unpaid',
+    client: { name: clean(st.client?.name), address: [st.client?.a1, st.client?.a2].map(clean).filter(Boolean).join(', '), phone: clean(st.client?.phone), email: clean(st.client?.email) },
+    project: clean(st.project), job_site: siteOf(st), lot: lotOf(st),
+    contract_amount: num(st.proposal), schedule_mode: st.mode === 'amt' ? 'dollars' : 'percent', this_draw: drawIndex(st) + 1,
+    draws: (st.draws || []).map((d, i) => ({ n: i + 1, description: clean(d.label), share: st.mode === 'pct' ? `${num(d.val)}%` : null, amount: amounts[i],
+      paid_or_request_date: toDate(d.date), check_no: clean(d.ck) || null })),
+    extra_items: (st.items || []).filter((it) => clean(it.desc) || num(it.amt)).map((it) => ({ description: clean(it.desc), amount: num(it.amt) })),
+    tax_rate_pct: num(st.taxRate), amount_due: invoiceTotal(rec), notes: redact(st.notes),
+  };
+}
+function estimateDetails(st) {
+  return {
+    estimate_no: st.estNo, date: toDate(st.estDate), valid_until: toDate(st.validUntil),
+    client: { name: clean(st.client?.name), address: [st.client?.a1, st.client?.a2].map(clean).filter(Boolean).join(', '), phone: clean(st.client?.phone), email: clean(st.client?.email) },
+    project: clean(st.project), job_site: siteOf(st), lot: lotOf(st), scope: redact(st.scope),
+    sections: (st.sections || []).map((sec) => ({ name: clean(sec.name), items: (sec.items || []).filter((it) => clean(it.desc) || num(it.rate))
+      .map((it) => ({ description: clean(it.desc), qty: num(it.qty), unit: it.unit, rate: num(it.rate), total: r2(num(it.qty) * num(it.rate)), optional: !!it.optional })) })),
+    discount: num(st.discount) ? `${num(st.discount)}${st.discountMode === 'pct' ? '%' : ' dollars'}` : null, tax_rate_pct: num(st.taxRate),
+    payment_schedule: (st.payments || []).map((p2) => ({ description: clean(p2.label), share: `${num(p2.pct)}%` })),
+    terms: redact(st.terms), exclusions: redact(st.exclusions),
+  };
+}
+
 async function importEstimate(rec, source, stats) {
   const st = rec.st;
   const extId = `${source}:est:${rec.id}`;
   const wanted = String(st.estNo || '').trim() || `EST-${String(rec.id).slice(0, 6)}`;
-  const jobName = jobNameFor(st);
-  const jobId = jobName ? await resolveJob(jobName, { create: true, client: st.client?.name || null,
-    status: rec.status === 'accepted' ? 'active' : rec.status === 'declined' ? 'lost' : 'estimating' }) : null;
+  const jobId = await jobFor(st, { status: rec.status === 'accepted' ? 'active' : rec.status === 'declined' ? 'lost' : 'estimating' });
+  stats.est_ids.push(extId);
   const items = [];
   for (const sec of st.sections || []) for (const it of sec.items || []) {
     if (!String(it.desc || '').trim() && !num(it.rate)) continue;
@@ -67,12 +132,12 @@ async function importEstimate(rec, source, stats) {
   const estNo = await freeNumber('estimates', 'est_no', wanted, existing && existing.id);
   if (estNo !== wanted) stats.renamed.push(`${wanted} → ${estNo}`);
   const vals = [estNo, jobId, st.client?.name || null, st.project || null, toDate(st.estDate), toDate(st.validUntil), num(rec.total),
-    rec.status || 'draft', JSON.stringify(items), st.scope || null];
+    rec.status || 'draft', JSON.stringify(items), st.scope || null, JSON.stringify(estimateDetails(st))];
   if (existing) {
-    await q(`UPDATE estimates SET est_no=$2, job_id=$3, client=$4, project=$5, est_date=$6, valid_until=$7, total=$8, status=$9, items=$10, scope=$11, updated_at=now() WHERE id=$1`, [existing.id, ...vals]);
+    await q(`UPDATE estimates SET est_no=$2, job_id=$3, client=$4, project=$5, est_date=$6, valid_until=$7, total=$8, status=$9, items=$10, scope=$11, details=$12, updated_at=now() WHERE id=$1`, [existing.id, ...vals]);
   } else {
-    await q(`INSERT INTO estimates (est_no, job_id, client, project, est_date, valid_until, total, status, items, scope, source, external_id, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())`, [...vals, source, extId]);
+    await q(`INSERT INTO estimates (est_no, job_id, client, project, est_date, valid_until, total, status, items, scope, details, source, external_id, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())`, [...vals, source, extId]);
   }
   if (jobId) {
     stats.jobs_touched.add(jobId);
@@ -102,15 +167,11 @@ async function importInvoice(rec, source, stats) {
   const st = rec.st; const ci = drawIndex(st);
   const extId = `${source}:inv:${rec.id}`;
   const wanted = String(st.invNo).trim();
-  const jobName = jobNameFor(st);
-  const client = String(st.client?.name || '').trim() || null;
-  const site = [st.site1, st.site2].map((x) => String(x || '').trim()).filter(Boolean).join(', ')
-    || [st.client?.a1, st.client?.a2].map((x) => String(x || '').trim()).filter(Boolean).join(', ') || null;
-  const jobId = jobName ? await resolveJob(jobName, { create: true, client }) : null;
+  const client = clean(st.client?.name) || null;
+  const jobId = await jobFor(st);
   if (jobId) {
     stats.jobs_touched.add(jobId);
-    await q(`UPDATE jobs SET client=COALESCE(client,$2), address=COALESCE(address,$3), pricing='fixed',
-      status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END WHERE id=$1`, [jobId, client, site]);
+    await q(`UPDATE jobs SET pricing='fixed', status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END WHERE id=$1`, [jobId]);
   }
   const amount = invoiceTotal(rec);
   const drawAmt = drawAmounts(st)[ci] || 0;
@@ -129,11 +190,11 @@ async function importInvoice(rec, source, stats) {
   if (existing) {
     await q(`UPDATE invoices SET invoice_no=$2, job_id=$3, client=$4, issue_date=$5, due_date=$6, amount=$7, draw_label=$8, notes=$9,
       draw_no=$10, draw_count=$11, terms=$12, draw_amount=$13, items_total=$14, tax=$15, contract_amount=$16, app_status=$17,
-      external_id=$18, source=$19, void=false WHERE id=$1`, [existing.id, ...vals, extId, source]);
+      details=$18, external_id=$19, source=$20, void=false WHERE id=$1`, [existing.id, ...vals, JSON.stringify(invoiceDetails(st, rec)), extId, source]);
   } else {
     await q(`INSERT INTO invoices (invoice_no, job_id, client, issue_date, due_date, amount, draw_label, notes, draw_no, draw_count, terms,
-      draw_amount, items_total, tax, contract_amount, app_status, external_id, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-    [...vals, extId, source]);
+      draw_amount, items_total, tax, contract_amount, app_status, details, external_id, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+    [...vals, JSON.stringify(invoiceDetails(st, rec)), extId, source]);
   }
   stats.invoices++;
   stats.stored[rec.id] = { invoice_no: invNo, amount, items: itemsTotal, tax, job_id: jobId, client, issue_date: issue, due_date: due };
@@ -165,7 +226,7 @@ function contractSchedule(recs, stats) {
     const paid = !!(markedPaid || checkNo);
     let date = null; let note = '';
     if (paid) {
-      date = paidDate || (markedPaid ? toDate(biller.updatedAt) : null) || (billed && billed.issue_date);
+      date = paidDate || (markedPaid ? (stats.marks[biller.id] || toDate(biller.updatedAt)) : null) || (billed && billed.issue_date);
       note = paidDate ? '' : markedPaid ? ' · dated when marked Paid' : ' · no paid date entered';
     }
     return {
@@ -183,7 +244,7 @@ function contractSchedule(recs, stats) {
 
 async function mirrorContracts(valid, source, stats) {
   const groups = {};
-  for (const r of valid) (groups[jobNameFor(r.st) || `#${r.id}`] ||= []).push(r);
+  for (const r of valid) (groups[jobKeyFor(r.st) || `#${r.id}`] ||= []).push(r);
   const keep = new Set(); const jobs = new Set();
   for (const recs of Object.values(groups)) {
     const c = contractSchedule(recs, stats);
@@ -229,16 +290,21 @@ async function mirrorContracts(valid, source, stats) {
   }
   // Remove synced rows whose invoice is gone from the app or that a hand-entered payment now covers.
   // Only for jobs in this sync; rows you entered yourself are never touched.
-  for (const job of jobs) {
+  if (stats.full) {
+    // The built-in app always has the complete set, so anything synced that isn't in it is gone.
+    const { rows } = await q(`SELECT id, ext_ref FROM transactions WHERE created_by='sync' AND ext_ref LIKE $1`, [`${source}:%`]);
+    for (const t of rows) if (!keep.has(t.ext_ref)) { await q('DELETE FROM transactions WHERE id=$1', [t.id]); stats.ledger_removed++; }
+  } else for (const job of jobs) {
     const { rows } = await q(`SELECT id, ext_ref FROM transactions WHERE created_by='sync' AND ext_ref LIKE $1 AND ${job === 'none' ? 'job_id IS NULL' : 'job_id=$2'}`,
       job === 'none' ? [`${source}:%`] : [`${source}:%`, Number(job)]);
     for (const t of rows) if (!keep.has(t.ext_ref)) { await q('DELETE FROM transactions WHERE id=$1', [t.id]); stats.ledger_removed++; }
   }
 }
 
-async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'invoice-app') {
-  const stats = { invoices: 0, estimates: 0, payments_added: 0, invoices_added: 0, ledger_updated: 0, ledger_removed: 0, jobs_touched: new Set(), renamed: [], skipped: [], flags: [], stored: {}, settings: await getSettings() };
+async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'invoice-app', { full = false } = {}) {
+  const stats = { full, est_ids: [], jobs_removed: 0, invoices: 0, estimates: 0, payments_added: 0, invoices_added: 0, ledger_updated: 0, ledger_removed: 0, jobs_touched: new Set(), renamed: [], skipped: [], flags: [], stored: {}, settings: await getSettings() };
   // One bad record never stops the rest of the sync.
+  stats.marks = Object.fromEntries((await q('SELECT record_id, paid_on FROM paid_marks')).rows.map((r) => [r.record_id, r.paid_on]));
   const safely = async (label, fn) => {
     try { await fn(); } catch (e) { stats.skipped.push(`${label}: ${e.message}`); console.error('Invoice-app sync skipped', label, e.message); }
   };
@@ -252,12 +318,31 @@ async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'inv
   // Invoices deleted in the app: voided here (not deleted) for jobs in this sync; they come back if the app sends them again.
   await safely('Removed invoices', async () => {
     const ids = valid.map((r) => `${source}:inv:${r.id}`);
-    const jobIds = [...stats.jobs_touched];
-    if (jobIds.length) await q(`UPDATE invoices SET void=true WHERE source=$1 AND job_id = ANY($2) AND NOT (external_id = ANY($3))`, [source, jobIds, ids]);
+    if (full) {
+      await q(`UPDATE invoices SET void=true WHERE source=$1 AND NOT (external_id = ANY($2))`, [source, ids]);
+      await q(`DELETE FROM estimates WHERE source=$1 AND NOT (external_id = ANY($2))`, [source, stats.est_ids]);
+    } else {
+      const jobIds = [...stats.jobs_touched];
+      if (jobIds.length) await q(`UPDATE invoices SET void=true WHERE source=$1 AND job_id = ANY($2) AND NOT (external_id = ANY($3))`, [source, jobIds, ids]);
+    }
   });
   await safely('Ledger', () => mirrorContracts(valid.filter((r) => stats.stored[r.id]), source, stats));
+  // Projects the app no longer feeds (e.g. two lots that an older sync had merged into one): emptied ones are removed,
+  // ones with your own entries (expenses, hours, miles) are kept and just lose their draw schedule.
+  if (full) await safely('Projects', async () => {
+    const { rows } = await q(`SELECT j.id,
+        EXISTS (SELECT 1 FROM transactions t WHERE t.job_id=j.id) AS has_tx,
+        EXISTS (SELECT 1 FROM time_entries te WHERE te.job_id=j.id) OR EXISTS (SELECT 1 FROM mileage m WHERE m.job_id=j.id) AS has_work
+      FROM jobs j WHERE (j.source IN ('invoice-app','estimate') OR j.draws_synced_at IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.job_id=j.id AND NOT i.void)
+        AND NOT EXISTS (SELECT 1 FROM estimates e WHERE e.job_id=j.id)`);
+    for (const j of rows) {
+      if (!j.has_tx && !j.has_work) { await q('UPDATE invoices SET job_id=NULL WHERE job_id=$1', [j.id]); await q('DELETE FROM jobs WHERE id=$1', [j.id]); stats.jobs_removed++; }
+      else await q('UPDATE jobs SET draws=NULL, change_orders=NULL, draws_synced_at=NULL WHERE id=$1', [j.id]);
+    }
+  });
   return { invoices: stats.invoices, estimates: stats.estimates, payments_added: stats.payments_added, invoices_added: stats.invoices_added, ledger_updated: stats.ledger_updated,
-    ledger_removed: stats.ledger_removed, jobs: stats.jobs_touched.size, renamed: stats.renamed, skipped: stats.skipped, flags: stats.flags };
+    ledger_removed: stats.ledger_removed, jobs: stats.jobs_touched.size, jobs_removed: stats.jobs_removed, renamed: stats.renamed, skipped: stats.skipped, flags: stats.flags };
 }
 
 // ---------- bank / card CSV ----------

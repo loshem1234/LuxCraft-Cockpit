@@ -11,6 +11,8 @@ const A = require('./agents');
 const F = require('./files');
 const IMP = require('./importers');
 const TTS = require('./tts');
+const BOOKS = require('./books');
+const fs = require('fs');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -49,8 +51,9 @@ app.post('/api/integrations/invoice-app', integrationLimit, wrap(async (req, res
   if (!tok) { await SEC.audit('integration.denied', 'invoice-app', ip(req)); return res.status(401).json({ error: 'Invalid token' }); }
   const body = req.body || {};
   if (!Array.isArray(body.invoices) && !Array.isArray(body.estimates)) return res.status(400).json({ error: 'Expected invoices and/or estimates' });
-  const r = await IMP.importInvoiceApp({ invoices: body.invoices || [], estimates: body.estimates || [] });
-  res.json({ ok: true, ...r });
+  // The invoice app is built into the Cockpit now; a second copy writing here would split the records.
+  void body;
+  res.status(410).json({ error: 'The invoice app is now built into the Cockpit (Invoicing tab). Export a backup from this app and import it there.' });
 }));
 // Ready for the website's lead intake later.
 app.post('/api/integrations/leads', integrationLimit, wrap(async (req, res) => {
@@ -66,6 +69,7 @@ app.post('/api/integrations/leads', integrationLimit, wrap(async (req, res) => {
 }));
 
 // ---------- auth ----------
+app.use('/api/books', express.json({ limit: '25mb' }));
 app.use('/api', express.json({ limit: '2mb' }));
 app.use('/api', SEC.csrfGuard);
 const loginLimit = SEC.rateLimit({ windowMs: 15 * 60000, max: 8 });
@@ -94,6 +98,22 @@ app.use('/api', wrap(async (req, res, next) => {
 }));
 app.use('/api', SEC.rateLimit({ windowMs: 60000, max: 400 }));
 const aiLimit = SEC.rateLimit({ windowMs: 60000, max: 30 });
+
+// ---------- built-in invoice & estimate app ----------
+// The app loads its data with this script (before its own code runs), then saves each change back.
+app.get('/api/books/store.js', wrap(async (req, res) => {
+  const data = await BOOKS.loadAll();
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  const safe = JSON.stringify({ ok: true, data }).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  res.send(`window.__LC_BOOKS=${safe};`);
+}));
+app.put('/api/books/:key', wrap(async (req, res) => {
+  if (!BOOKS.isKey(req.params.key)) return res.status(404).json({ error: 'Unknown key' });
+  const b = req.body || {};
+  const r = await BOOKS.save(req.params.key, b.value ?? null, b.version ?? 0, { changed: b.changed, deleted: b.deleted });
+  res.json(r);
+}));
 
 // ---------- meta / overview ----------
 app.get('/api/meta', wrap(async (req, res) => {
@@ -175,7 +195,8 @@ app.post('/api/invoices/import-backup', upload.single('file'), wrap(async (req, 
   let data;
   try { data = JSON.parse(req.file.buffer.toString('utf8')); } catch { return res.status(400).json({ error: 'That isn\'t a backup file (JSON).' }); }
   if (!Array.isArray(data.invoices) && !Array.isArray(data.estimates)) return res.status(400).json({ error: 'That isn\'t a LuxCraft invoices or estimates backup.' });
-  const r = await IMP.importInvoiceApp({ invoices: data.invoices || [], estimates: data.estimates || [] }, 'invoice-app');
+  // Backups go into the built-in invoice app's own data (newer copy of each record wins), then everything refreshes.
+  const r = await BOOKS.importBackup(data);
   await SEC.audit('import.invoice-backup', JSON.stringify(r), ip(req));
   res.json(r);
 }));
@@ -457,6 +478,31 @@ app.use('/api', (err, req, res, next) => {
     : status >= 500 && !err.expose && !/ANTHROPIC|GEMINI|Voice|read/.test(err.message) ? 'Something went wrong on the server.' : err.message;
   res.status(status).json({ error: msg });
 });
+// The invoice app's pages: login required, allowed inside the Cockpit's Invoicing tab, and their own inline script
+// permitted by hash (nothing else inline can run).
+const APP_DIR = path.join(__dirname, '..', 'public', 'invoice-app');
+const appPages = {};
+for (const f of ['index.html', 'estimate.html']) {
+  const html = fs.readFileSync(path.join(APP_DIR, f), 'utf8');
+  const hashes = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${require('crypto').createHash('sha256').update(m[1]).digest('base64')}'`);
+  appPages[f] = { html, csp: [
+    "default-src 'self'", `script-src 'self' ${hashes.join(' ')}`, "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com", "img-src 'self' data: blob:", "connect-src 'self'", "object-src 'none'",
+    "base-uri 'none'", "form-action 'self'", "frame-ancestors 'self'"].join('; ') };
+}
+app.use('/invoice-app', wrap(async (req, res, next) => {
+  const s = await SEC.getSession(req);
+  if (!s) return res.redirect('/');
+  const file = req.path === '/' || req.path === '' ? 'index.html' : req.path.replace(/^\//, '');
+  if (appPages[file]) {
+    res.setHeader('Content-Security-Policy', appPages[file].csp);
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('html').send(appPages[file].html);
+    return;
+  }
+  next();
+}));
 app.use(express.static(path.join(__dirname, '..', 'public'), { extensions: ['html'], setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 

@@ -88,6 +88,7 @@ const READ_TOOLS = [
   { name: 'find_transactions', description: 'Search the ledger.', input_schema: { type: 'object', properties: { from: str('YYYY-MM-DD'), to: str('YYYY-MM-DD'), kind: { type: 'string', enum: ['income', 'expense'] }, category: str('Category'), job_name: str('Job'), search: str('Text in vendor/memo/check #/invoice #'), unbilled_only: { type: 'boolean' }, limit: { type: 'integer' } } } },
   { name: 'get_jobs', description: 'All jobs with status, pricing, contract, estimate, income, costs, profit, margin, hours and profit per hour, unbilled reimbursables.', input_schema: { type: 'object', properties: {} } },
   { name: 'get_job_detail', description: 'One job in depth: its transactions, time entries, invoices and estimate line items.', input_schema: { type: 'object', properties: { job_name: str('Job name') }, required: ['job_name'] } },
+  { name: 'get_invoice', description: 'Everything written on one invoice (client, project, lot, job site, full draw schedule with descriptions and shares, this draw, extra items, tax, terms, notes) plus its live paid/balance status.', input_schema: { type: 'object', properties: { invoice_no: str('Invoice number, e.g. LC-41') }, required: ['invoice_no'] } },
   { name: 'get_invoices', description: 'Invoices with paid/balance/status/days out.', input_schema: { type: 'object', properties: { status: { type: 'string', enum: ['unpaid', 'paid', 'overdue', 'all'] } } } },
   { name: 'get_estimates', description: 'Estimates (bids) with status and line items (qty, unit, rate). Optional keyword filters line items, e.g. "drywall" or "tile".', input_schema: { type: 'object', properties: { keyword: str('Line-item keyword'), status: str('draft/sent/accepted/declined') } } },
   { name: 'get_tax_summary', description: 'Schedule C lines, net profit, tax estimate (SE, federal, Ohio, school district, city), quarterly payments, 1099 tracker, sales/use tax, home office, planned purchases with estimated savings.', input_schema: { type: 'object', properties: { year: { type: 'integer' } } } },
@@ -246,8 +247,18 @@ async function runRead(name, input, agentId) {
       if (!id) return { error: 'No job by that name' };
       const job = (await S.listJobs()).find((j) => j.id === id);
       const [tx, time, inv, est] = await Promise.all([S.listTransactions({ job_id: id, limit: 300 }), S.listTimeEntries({ job_id: id }),
-        S.listInvoices(), q('SELECT est_no, status, total, est_date, items, scope FROM estimates WHERE job_id=$1', [id])]);
-      return { job, transactions: tx.map(({ created_at, ext_ref, ...t }) => t), time_entries: time, invoices: inv.filter((i) => i.job_id === id), estimates: est.rows };
+        S.listInvoices(), q('SELECT est_no, status, total, est_date, details FROM estimates WHERE job_id=$1', [id])]);
+      return { job, invoices: inv.filter((i) => i.job_id === id && i.status !== 'void').map(({ attachment_id, external_id, created_at, ...i }) => i),
+        estimates: est.rows, transactions: tx.map(({ created_at, ext_ref, ...t }) => t), time_entries: time };
+    }
+    case 'get_invoice': {
+      const all = await S.listInvoices();
+      const i = all.find((x) => x.invoice_no.toLowerCase() === String(input.invoice_no || '').trim().toLowerCase());
+      if (!i) return { error: 'No invoice with that number' };
+      const job = i.job_id ? (await S.listJobs()).find((j) => j.id === i.job_id) : null;
+      return { invoice_no: i.invoice_no, status: i.status, amount: i.amount, paid: i.paid, balance: i.balance, issue_date: i.issue_date, due_date: i.due_date,
+        payments: i.payments, written_on_invoice: i.details, project: job ? { name: job.name, lot: job.lot, contract_total: job.contract_total, collected: job.income,
+          owed: job.owed, still_to_bill: job.to_bill, draw_schedule: job.draws } : null };
     }
     case 'get_invoices': return (await S.listInvoices({ status: input.status === 'all' ? null : input.status }))
       .map((i) => ({ invoice_no: i.invoice_no, client: i.client, job: i.job_name, draw: i.draw_label, amount: i.amount, paid: i.paid, balance: i.balance, issue_date: i.issue_date, due_date: i.due_date, days_out: i.days_out, status: i.status, payments: i.payments }));
@@ -286,7 +297,7 @@ async function staticPrompt(cfg, agentId) {
   return `You are ${cfg.name}, the ${cfg.title} on LuxCraft Renovations' team. You live on the ${cfg.page} tab of the LuxCraft Cockpit.
 
 THE BUSINESS
-LuxCraft Renovations is Loshem's handyman and remodeling business serving Dayton and the Miami Valley, Ohio. Loshem lives in Fairborn (Greene County). It is a sole proprietorship / single-member LLC filing Schedule C. Jobs are mostly fixed bid with a deposit (counted as income, the first draw) and progress draws. He pays helpers and subs on 1099 (no W-2 payroll), frequently buys materials clients reimburse at cost or with a markup, and plans his helpers' days as well as his own. His invoices and estimates come from his own LuxCraft invoice app and sync into the cockpit.
+LuxCraft Renovations is Loshem's handyman and remodeling business serving Dayton and the Miami Valley, Ohio. Loshem lives in Fairborn (Greene County). It is a sole proprietorship / single-member LLC filing Schedule C. Jobs are mostly fixed bid with a deposit (counted as income, the first draw) and progress draws. He pays helpers and subs on 1099 (no W-2 payroll), frequently buys materials clients reimburse at cost or with a markup, and plans his helpers' days as well as his own. He writes invoices and estimates in the invoice & estimate app on the Cockpit's Invoicing tab; they save straight into the Cockpit, so get_invoice, get_job_detail, get_estimates and get_jobs show exactly what is written on them (scope, draw descriptions, change-order items, terms, notes) – read them instead of asking him to repeat anything. Each lot is its own project (e.g. "Lot 262 · Full Interior Carpentry Package"); one contract per lot, billed as progress draws. A draw is paid ONLY when the data says paid (he marks the invoice Paid in the app, or enters the draw's check # on a later invoice). Never call an invoice paid because a later invoice prints it under "Paid to date"; if the two disagree, say so and suggest he mark it. Invoice amounts, dates and paid marks are changed in the invoice app, not by proposals.
 The team: ${team}.
 
 YOUR SPECIALTY
@@ -305,12 +316,17 @@ async function dynamicPrompt() {
   const dow = new Date(today + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long' });
   const facts = await q('SELECT id, text FROM facts ORDER BY id');
   const pending = await q(`SELECT id, agent, summary FROM proposals WHERE status='pending' ORDER BY id DESC LIMIT 20`);
-  const jobs = await q(`SELECT name, status FROM jobs WHERE status IN ('active','estimating','lead') ORDER BY created_at DESC LIMIT 30`);
+  const jobs = (await S.listJobs()).filter((j) => ['active', 'estimating', 'lead'].includes(j.status)).slice(0, 40);
+  const projectLine = (j) => {
+    const d = Array.isArray(j.draws) ? j.draws : [];
+    const draws = d.length ? ` · draws: ${d.map((x) => `#${x.n} ${x.status}${x.invoice_no ? ` ${x.invoice_no}` : ''}`).join(', ')}` : '';
+    return `${j.name}${j.client ? ` (${j.client})` : ''} [${j.status}]${j.contract_total ? ` contract $${j.contract_total}, collected $${j.income}, owed $${j.owed}, to bill $${j.to_bill}` : ''}${draws}`;
+  };
   const cats = await q(`SELECT name, kind FROM categories WHERE active ORDER BY kind, sort`);
   const workers = await q(`SELECT name, role FROM workers WHERE active ORDER BY id`);
   return `Today is ${dow}, ${today} (America/New_York).
 Shared team memory (facts Loshem approved): ${facts.rows.length ? facts.rows.map((f) => `#${f.id} ${f.text}`).join(' | ') : 'none yet'}.
-Open jobs: ${jobs.rows.map((j) => `${j.name} [${j.status}]`).join(', ') || 'none'}.
+Open projects (live):\n${jobs.map(projectLine).join('\n') || 'none'}
 Crew: ${workers.rows.map((w) => `${w.name}${w.role === 'owner' ? ' (Loshem)' : ''}`).join(', ')}.
 Categories – income: ${cats.rows.filter((c) => c.kind === 'income').map((c) => c.name).join(', ')}; expense: ${cats.rows.filter((c) => c.kind === 'expense').map((c) => c.name).join(', ')}.
 Pending approvals: ${pending.rows.length ? pending.rows.map((p) => `#${p.id} (${p.agent}) ${p.summary}`).join(' | ') : 'none'}.`;

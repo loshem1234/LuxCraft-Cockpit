@@ -197,6 +197,22 @@ ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tax NUMERIC(12,2);
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS contract_amount NUMERIC(12,2);
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS app_status TEXT;
 
+-- The built-in invoice & estimate app's data (exactly what the app saves), one row per app key.
+CREATE TABLE IF NOT EXISTS books (
+  key TEXT PRIMARY KEY,
+  value JSONB,
+  version INT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+-- The day each invoice was marked Paid in the app (the app itself doesn't record it).
+CREATE TABLE IF NOT EXISTS paid_marks (record_id TEXT PRIMARY KEY, paid_on DATE NOT NULL);
+-- One project per lot: the importer finds its jobs by this key (client + lot, or client + site address).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ext_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_ext_key_idx ON jobs(ext_key) WHERE ext_key IS NOT NULL;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lot TEXT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS details JSONB;
+ALTER TABLE estimates ADD COLUMN IF NOT EXISTS details JSONB;
+
 -- Agents
 CREATE TABLE IF NOT EXISTS agent_messages (
   id SERIAL PRIMARY KEY,
