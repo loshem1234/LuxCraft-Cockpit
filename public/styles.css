@@ -323,3 +323,9 @@ body.drawer-open .fab { right: 422px; } body.drawer-open .fab-menu { right: 422p
 .agent-form label:last-child { align-self: end; }
 @media (max-width: 760px) { body[data-tab="productivity"] .fab, body[data-tab="productivity"] .fab-menu { display: none; } }
 td.n.awaiting { color: var(--muted); font-style: italic; }
+.progress.stack { display: flex; }
+.progress.stack > span { border-radius: 0; }
+.progress.stack > span:first-child { border-radius: 99px 0 0 99px; }
+.progress.stack > span.owed { background: var(--warn); opacity: .75; }
+td.mono .note { font-family: Archivo, system-ui, sans-serif; white-space: nowrap; }
+.progress.stack > span.owed { background: repeating-linear-gradient(45deg, var(--gold) 0 4px, transparent 4px 7px); opacity: .9; }
