@@ -329,3 +329,9 @@ td.n.awaiting { color: var(--muted); font-style: italic; }
 .progress.stack > span.owed { background: var(--warn); opacity: .75; }
 td.mono .note { font-family: Archivo, system-ui, sans-serif; white-space: nowrap; }
 .progress.stack > span.owed { background: repeating-linear-gradient(45deg, var(--gold) 0 4px, transparent 4px 7px); opacity: .9; }
+/* Invoicing tab: the invoice app fills the page */
+body[data-tab="invoicing"] main { max-width: none; padding: 0; }
+#tab-invoicing.active { display: block; }
+#invoiceFrame { display: block; width: 100%; height: calc(100vh - 57px); border: 0; background: #f4f1ea; }
+body[data-tab="invoicing"] .fab, body[data-tab="invoicing"] .fab-menu { display: none; }
+@media (max-width: 760px) { #invoiceFrame { height: calc(100vh - 57px - 64px - env(safe-area-inset-bottom)); } }
