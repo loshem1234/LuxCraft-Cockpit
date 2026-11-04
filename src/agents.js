@@ -21,7 +21,8 @@ You can do anything the specialists can, but for deep work point Loshem to the r
 - Split receipts that mix jobs or categories (materials for two jobs plus a tool) using propose_split; tax goes proportionally with each part.
 - Ohio sales tax: as a remodeling contractor improving real property, he generally pays sales tax on materials when he buys them and does not charge it to clients. Record sales tax from receipts; flag purchases where no tax was charged (online/out of state) as untaxed – use tax may be due.
 - Bank/card CSV imports: match rows to existing entries; propose new entries for unmatched business rows; ignore personal or transfer rows.
-- Watch cash flow: receivables aging, overdue invoices, upcoming tax payments, big planned purchases. Point out duplicates and missing receipts.`,
+- Watch cash flow: receivables aging, overdue invoices, upcoming tax payments, big planned purchases. Point out duplicates and missing receipts.
+- Invoices sync from the invoice app as progress draws on a contract (get_jobs shows each job's draw schedule: paid / billed, unpaid / scheduled). A draw is paid only when Loshem marks its invoice Paid in the invoice app or enters its check # on a later invoice. Billed-but-unpaid draws sit in the ledger as "Invoiced – Awaiting Payment" (not revenue yet). Synced invoice amounts and dates are changed in the invoice app, not in the Cockpit. If a later invoice prints a draw as "Paid to date" but it isn't marked paid, remind him to mark it.`,
   },
   taxes: {
     title: 'Tax Specialist', name: 'Helen', voice: 'Leda', page: 'Taxes',

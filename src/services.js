@@ -150,6 +150,8 @@ async function listJobs() {
       COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.job_id=j.id AND t.kind='expense' AND t.category NOT IN ${NOT_OPERATING}),0) AS expenses,
       COALESCE((SELECT SUM(amount * (1 + COALESCE(markup_pct,0)/100)) FROM transactions t WHERE t.job_id=j.id AND t.billable AND NOT t.billed),0) AS unbilled,
       COALESCE((SELECT SUM(amount) FROM invoices i WHERE i.job_id=j.id AND NOT i.void),0) AS invoiced,
+      COALESCE((SELECT SUM(GREATEST(0, i.amount - COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.kind='income' AND t.category<>'${AWAITING}'
+        AND lower(t.invoice_no)=lower(i.invoice_no)),0))) FROM invoices i WHERE i.job_id=j.id AND NOT i.void),0) AS owed,
       COALESCE((SELECT SUM(hours) FROM time_entries te WHERE te.job_id=j.id AND te.worker='Me'),0) AS my_hours,
       COALESCE((SELECT SUM(hours) FROM time_entries te WHERE te.job_id=j.id AND te.worker<>'Me'),0) AS crew_hours,
       (SELECT json_build_object('est_no',e.est_no,'total',e.total,'status',e.status) FROM estimates e WHERE e.job_id=j.id ORDER BY (e.status='accepted') DESC, e.est_date DESC LIMIT 1) AS estimate
@@ -161,7 +163,15 @@ async function listJobs() {
     const vehicle = settings.vehicle_method === 'standard' ? round2(mileCost[j.id] || 0) : 0;
     const cost = round2(j.expenses + vehicle);
     const profit = round2(j.income - cost);
-    return { ...j, unbilled: round2(j.unbilled), vehicle_cost: vehicle, total_cost: cost, profit,
+    // Contract position: what's been billed, collected, owed, and what's still scheduled to bill.
+    const draws = Array.isArray(j.draws) ? j.draws : null;
+    const contractTotal = round2((j.contract_amount || 0) + (j.change_orders || 0));
+    const toBill = draws ? round2(draws.filter((d) => d.status === 'scheduled').reduce((a, d) => a + d.amount, 0))
+      : round2(Math.max(0, (j.contract_amount || 0) - j.invoiced));
+    return { ...j, unbilled: round2(j.unbilled), owed: round2(j.owed), contract_total: contractTotal, to_bill: toBill,
+      draws_paid: draws ? draws.filter((d) => d.status === 'paid').length : null, draws_total: draws ? draws.length : null,
+      draw_flags: draws ? draws.filter((d) => d.flag).map((d) => `Draw ${d.n}: ${d.flag}`) : [],
+      vehicle_cost: vehicle, total_cost: cost, profit,
       margin: j.income > 0 ? profit / j.income : null, per_hour: j.my_hours > 0 ? round2(profit / j.my_hours) : null };
   });
 }
@@ -450,6 +460,9 @@ async function overview() {
     receivables: { total: round2(invoices.reduce((s, i) => s + i.balance, 0)), count: invoices.length,
       overdue: invoices.filter((i) => i.status === 'overdue').length, items: invoices.slice(0, 6) },
     unbilled: round2(unbilled.rows[0].v),
+    backlog: await (async () => { const js = (await listJobs()).filter((j) => j.status === 'active');
+      return { to_bill: round2(js.reduce((a, j) => a + j.to_bill, 0)), jobs: js.filter((j) => j.to_bill > 0).length,
+        flags: js.flatMap((j) => j.draw_flags.map((f) => `${j.name} · ${f}`)) }; })(),
     tax: { net_profit: tax.net_profit, estimate: tax.estimate.total, paid: tax.estimate.paid, remaining: tax.estimate.remaining,
       pct: tax.estimate.effective_set_aside_pct, next_deadline: tax.next_deadline },
     today_log: log.rows[0] || null,

@@ -323,7 +323,7 @@ app.post('/api/tts', aiLimit, wrap(async (req, res) => {
 }));
 
 // ---------- settings & categories ----------
-const USER_SETTING_KEYS = ['business_name', 'business_city', 'vehicle_method', 'default_markup_pct', 'daily_target', 'goal_monthly_revenue',
+const USER_SETTING_KEYS = ['business_name', 'business_city', 'receipt_grace_days', 'vehicle_method', 'default_markup_pct', 'daily_target', 'goal_monthly_revenue',
   'mileage_rates', 'ss_wage_base', 'threshold_1099', 'filing_status', 'other_income', 'apply_qbi', 'tax_tables', 'ohio_bid', 'ohio_business_rate',
   'school_district_rate', 'city_rate', 'use_tax_rate', 'home_office_sqft', 'home_office_method'];
 app.put('/api/settings', wrap(async (req, res) => {

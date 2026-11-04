@@ -184,6 +184,19 @@ CREATE TABLE IF NOT EXISTS bank_rows (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Contract draw schedules and invoice detail (synced from the invoice app)
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS draws JSONB;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS change_orders NUMERIC(12,2);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS draws_synced_at TIMESTAMPTZ;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS draw_no INT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS draw_count INT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS terms TEXT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS draw_amount NUMERIC(12,2);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS items_total NUMERIC(12,2);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tax NUMERIC(12,2);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS contract_amount NUMERIC(12,2);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS app_status TEXT;
+
 -- Agents
 CREATE TABLE IF NOT EXISTS agent_messages (
   id SERIAL PRIMARY KEY,
@@ -303,6 +316,7 @@ const DEFAULT_SETTINGS = {
   default_markup_pct: '0',
   daily_target: '0',
   goal_monthly_revenue: '0',
+  receipt_grace_days: '14', // a "Due upon receipt" invoice counts as overdue after this many days
   // IRS business standard mileage rates by effective date (2026 rose mid-year on July 1).
   mileage_rates: JSON.stringify([{ from: '2025-01-01', rate: 0.70 }, { from: '2026-01-01', rate: 0.725 }, { from: '2026-07-01', rate: 0.76 }]),
   ss_wage_base: JSON.stringify({ 2025: 176100, 2026: 184500 }),
