@@ -75,11 +75,17 @@ The invoice app keeps its data in the browser, so the browser sends it here:
 
 Every save then syncs. Estimates come across with their line items; accepted estimates set the job's contract and make it active. Jobs are named "Client · Project".
 
-**Every invoice goes into the income ledger automatically, linked to its invoice – no double entry.**
-- When an invoice syncs, it appears in the ledger right away for its exact amount (including change orders and tax), dated the invoice date, as **Invoiced – Awaiting Payment**. Awaiting rows show in the ledger and "Owed to you" but are not counted as revenue or taxed.
-- When the invoice app shows the draw received (the paid date and check # on the next invoice's draw schedule, or the invoice marked Paid), the same row becomes **Contract Revenue**, dated the paid date with the check #.
-- Change an amount, date or check # in the invoice app and the row follows on the next sync; delete an invoice there and its row is removed. One invoice is always one row, so the two apps can't drift apart.
-- If you record a check for an invoice by hand in the Cockpit, your entry counts and the synced row steps aside, so nothing is counted twice.
+**Contracts and draws.** All invoices for the same client + project are one contract (one job). The newest invoice carries the draw schedule, and the Cockpit keeps that schedule on the job: each draw is **Paid**, **Billed, unpaid** (or **Overdue**), or **Scheduled**, with its invoice #, amount (draw + change-order items + tax), dates and check #. The job shows contract total (including change orders), collected, owed, and still to bill.
+
+**You decide what's paid.** A draw counts as paid only when you mark its invoice **Paid** in the invoice app, or enter its **check #** on a later invoice's draw schedule. The paid date you enter there is used; without one, it's dated the day you marked it Paid. A billed draw that isn't marked paid stays owed – even if a later invoice prints it under "Paid to date" – and the Cockpit flags it so you can mark it.
+
+**Every billed draw is in the income ledger, linked to its invoice – no double entry.**
+- Billed and unpaid: **Invoiced – Awaiting Payment**, dated the invoice date, for the exact invoice amount. Counted in "Owed to you", not as revenue or taxed.
+- Paid: the same row becomes **Contract Revenue**, dated the paid date with the check #.
+- Scheduled draws that haven't been billed appear as "Still to bill", not in the ledger.
+- Due dates come from the invoice terms ("Net 30" → 30 days). "Due upon receipt" invoices count as overdue after the grace days in Settings → Business (default 14).
+- Edit or delete an invoice in the invoice app and the Cockpit follows on the next sync (deleted invoices are voided, not erased). Mark payments in the invoice app; synced invoices aren't edited in the Cockpit, so the two can't drift apart.
+- The Cockpit doesn't store invoice notes or payment instructions (e.g. wire/bank details printed on the invoice).
 
 You can also upload the app's **Export backup** files on the Invoices tab.
 
