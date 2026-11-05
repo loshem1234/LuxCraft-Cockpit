@@ -361,18 +361,13 @@ async function respond(agentId, userText, { kind = 'chat', instruction = null } 
       user_location: { type: 'approximate', city: settings.business_city || 'Fairborn', region: 'Ohio', country: 'US', timezone: 'America/New_York' } },
   ];
 
-  const proposalIds = []; const sources = new Map(); let finalText = '';
-  for (let i = 0; i < 12; i++) {
-    const resp = await api.messages.create({ model: MODEL, max_tokens: 2500, system, tools, messages });
-    for (const b of resp.content) {
-      if (b.type === 'text' && Array.isArray(b.citations)) for (const c of b.citations) if (c.url) sources.set(c.url, c.title || c.url);
-    }
-    const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
-    if (resp.stop_reason === 'pause_turn') { messages.push({ role: 'assistant', content: resp.content }); continue; }
-    if (resp.stop_reason !== 'tool_use') { finalText = text; break; }
-    messages.push({ role: 'assistant', content: resp.content });
+  const proposalIds = []; const sources = new Map();
+  let finalText = ''; let spoken = ''; let lastStop = null; let rounds = 0;
+  const MAX_ROUNDS = 10;
+  const call = (extra = {}) => api.messages.create({ model: MODEL, max_tokens: 6000, system, tools, messages, ...extra });
+  const runTools = async (content) => {
     const results = [];
-    for (const b of resp.content.filter((x) => x.type === 'tool_use')) {
+    for (const b of content.filter((x) => x.type === 'tool_use')) {
       try {
         let out;
         if (b.name.startsWith('propose_') || b.name === 'remember_fact' || b.name === 'forget_fact') {
@@ -389,10 +384,50 @@ async function respond(agentId, userText, { kind = 'chat', instruction = null } 
         results.push({ type: 'tool_result', tool_use_id: b.id, content: `Error: ${err.message}`, is_error: true });
       }
     }
-    messages.push({ role: 'user', content: results });
-    if (text) finalText = text;
+    return results;
+  };
+  for (; rounds < MAX_ROUNDS; rounds++) {
+    const resp = await call();
+    lastStop = resp.stop_reason;
+    for (const b of resp.content) {
+      if (b.type === 'text' && Array.isArray(b.citations)) for (const c of b.citations) if (c.url) sources.set(c.url, c.title || c.url);
+    }
+    const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    // Keep everything she has said this turn; an empty closing message must not erase it.
+    if (text) spoken = spoken ? `${spoken}\n\n${text}` : text;
+    if (resp.stop_reason === 'pause_turn') { messages.push({ role: 'assistant', content: resp.content }); continue; }
+    if (resp.stop_reason === 'max_tokens') {
+      // Cut off mid-reply: keep what's complete, drop a half-written tool call, and ask her to finish briefly.
+      const complete = resp.content.filter((b, i, arr) => !(b.type === 'tool_use' && i === arr.length - 1));
+      if (complete.some((b) => b.type === 'tool_use')) {
+        messages.push({ role: 'assistant', content: complete });
+        messages.push({ role: 'user', content: [...await runTools(complete), { type: 'text', text: 'Your last reply was cut off. Finish briefly.' }] });
+      } else {
+        if (complete.length) messages.push({ role: 'assistant', content: complete });
+        messages.push({ role: 'user', content: 'Your last reply was cut off. Finish briefly – keep it short.' });
+      }
+      continue;
+    }
+    if (resp.stop_reason !== 'tool_use') { finalText = text; break; }
+    messages.push({ role: 'assistant', content: resp.content });
+    messages.push({ role: 'user', content: await runTools(resp.content) });
   }
-  if (!finalText) finalText = proposalIds.length ? "I've put that up for your approval." : "Sorry, I couldn't finish that – try asking another way.";
+  // Ran out of rounds, or ended without saying anything: one last call with tools switched off, so she answers
+  // with what she has already looked up instead of giving up.
+  if (!finalText && messages[messages.length - 1].role === 'user') {
+    try {
+      const wrap = await call({ tool_choice: { type: 'none' } });
+      const text = wrap.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+      if (text) finalText = text;
+      lastStop = `${lastStop}→wrap:${wrap.stop_reason}`;
+    } catch (e) { console.error(`[agent ${agentId}] wrap-up call failed:`, e.message); }
+  }
+  if (!finalText) finalText = spoken;
+  if (!finalText) {
+    console.warn(`[agent ${agentId}] no reply text after ${rounds} rounds (last stop: ${lastStop})`);
+    finalText = proposalIds.length ? "I've put that up for your approval." : lastStop === 'refusal'
+      ? "I can't help with that one." : "I looked into it but couldn't put an answer together. Could you ask me again?";
+  }
 
   if (userText && !instruction) await q('INSERT INTO agent_messages (agent, role, kind, text) VALUES ($1,$2,$3,$4)', [agentId, 'user', kind, userText]);
   const saved = await q(`INSERT INTO agent_messages (agent, role, kind, text, proposals, sources) VALUES ($1,'assistant',$2,$3,$4,$5) RETURNING *`,
