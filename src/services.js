@@ -43,8 +43,16 @@ async function normalizeTx(t) {
     billed: bool(t.billed), sales_tax: t.sales_tax === '' || t.sales_tax == null ? null : round2(t.sales_tax), untaxed: bool(t.untaxed),
   };
 }
+// Invoice payments live on the invoice (Invoicing tab), so a hand-entered payment for one of its invoices would be a
+// second copy of the same money.
+async function guardInvoicePayment(n, createdBy) {
+  if (createdBy === 'sync' || n.kind !== 'income' || n.category === AWAITING || !n.invoice_no) return;
+  const inv = (await q(`SELECT invoice_no FROM invoices WHERE lower(invoice_no)=lower($1) AND source='invoice-app' AND NOT void`, [n.invoice_no])).rows[0];
+  if (inv) throw Object.assign(new Error(`${inv.invoice_no} is in the Invoicing tab – record its payment there (click its Unpaid button) so it's only counted once.`), { status: 400 });
+}
 async function addTransaction(t, createdBy = 'manual', client = null) {
   const n = await normalizeTx(t);
+  await guardInvoicePayment(n, createdBy);
   const db = client || pool;
   const { rows } = await db.query(
     `INSERT INTO transactions (${TX_FIELDS.join(',')}, split_group, ext_ref, created_by)
@@ -54,6 +62,8 @@ async function addTransaction(t, createdBy = 'manual', client = null) {
 }
 async function updateTransaction(id, t) {
   const n = await normalizeTx(t);
+  const cur = (await q('SELECT created_by FROM transactions WHERE id=$1', [id])).rows[0];
+  await guardInvoicePayment(n, cur ? cur.created_by : 'manual');
   const { rows } = await q(
     `UPDATE transactions SET ${TX_FIELDS.map((f, i) => (f === 'attachment_id' ? `${f}=COALESCE($${i + 2}, ${f})` : `${f}=$${i + 2}`)).join(', ')} WHERE id=$1 RETURNING *`,
     [id, ...TX_FIELDS.map((f) => n[f])]);
@@ -116,9 +126,10 @@ async function listInvoices({ status } = {}) {
     let st = r.void ? 'void' : balance <= 0.004 ? 'paid' : r.paid > 0 ? 'partial' : 'open';
     const overdue = !['paid', 'void'].includes(st) && r.due_date && r.due_date < today;
     const daysOut = r.issue_date ? Math.floor((Date.parse(today) - Date.parse(r.issue_date)) / 86400000) : null;
-    return { ...r, balance, status: overdue ? 'overdue' : st, days_out: daysOut, payments: r.payments || [] };
+    // Only invoices from the Invoicing tab count toward what you're owed; others are listed so you can delete them.
+    return { ...r, balance, status: overdue ? 'overdue' : st, days_out: daysOut, payments: r.payments || [], counted: r.source === 'invoice-app' };
   });
-  return status ? out.filter((r) => (status === 'unpaid' ? ['open', 'partial', 'overdue'].includes(r.status) : r.status === status)) : out;
+  return status ? out.filter((r) => r.counted && (status === 'unpaid' ? ['open', 'partial', 'overdue'].includes(r.status) : r.status === status)) : out;
 }
 async function upsertInvoice(inv, source = 'manual') {
   const jobId = inv.job_id ? await resolveJob(inv.job_id) : await resolveJob(inv.job_name ?? null, { create: !!inv.job_name, client: inv.client });
@@ -149,9 +160,9 @@ async function listJobs() {
       COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.job_id=j.id AND t.kind='income' AND t.category NOT IN ${NOT_REVENUE}),0) AS income,
       COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.job_id=j.id AND t.kind='expense' AND t.category NOT IN ${NOT_OPERATING}),0) AS expenses,
       COALESCE((SELECT SUM(amount * (1 + COALESCE(markup_pct,0)/100)) FROM transactions t WHERE t.job_id=j.id AND t.billable AND NOT t.billed),0) AS unbilled,
-      COALESCE((SELECT SUM(amount) FROM invoices i WHERE i.job_id=j.id AND NOT i.void),0) AS invoiced,
+      COALESCE((SELECT SUM(amount) FROM invoices i WHERE i.job_id=j.id AND NOT i.void AND i.source='invoice-app'),0) AS invoiced,
       COALESCE((SELECT SUM(GREATEST(0, i.amount - COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.kind='income' AND t.category<>'${AWAITING}'
-        AND lower(t.invoice_no)=lower(i.invoice_no)),0))) FROM invoices i WHERE i.job_id=j.id AND NOT i.void),0) AS owed,
+        AND lower(t.invoice_no)=lower(i.invoice_no)),0))) FROM invoices i WHERE i.job_id=j.id AND NOT i.void AND i.source='invoice-app'),0) AS owed,
       COALESCE((SELECT SUM(hours) FROM time_entries te WHERE te.job_id=j.id AND te.worker='Me'),0) AS my_hours,
       COALESCE((SELECT SUM(hours) FROM time_entries te WHERE te.job_id=j.id AND te.worker<>'Me'),0) AS crew_hours,
       (SELECT json_build_object('est_no',e.est_no,'total',e.total,'status',e.status) FROM estimates e WHERE e.job_id=j.id ORDER BY (e.status='accepted') DESC, e.est_date DESC LIMIT 1) AS estimate
@@ -166,9 +177,10 @@ async function listJobs() {
     // Contract position: what's been billed, collected, owed, and what's still scheduled to bill.
     const draws = Array.isArray(j.draws) ? j.draws : null;
     const contractTotal = round2((j.contract_amount || 0) + (j.change_orders || 0));
-    const toBill = draws ? round2(draws.filter((d) => d.status === 'scheduled').reduce((a, d) => a + d.amount, 0))
-      : round2(Math.max(0, (j.contract_amount || 0) - j.invoiced));
-    return { ...j, unbilled: round2(j.unbilled), owed: round2(j.owed), contract_total: contractTotal, to_bill: toBill,
+    // Still to bill comes only from an invoice's draw schedule – never guessed from a contract amount.
+    const toBill = draws ? round2(draws.filter((d) => d.status === 'scheduled').reduce((a, d) => a + d.amount, 0)) : 0;
+    const collected = draws ? round2(draws.filter((d) => d.status === 'paid').reduce((a, d) => a + (d.received ?? d.billed_amount ?? d.amount), 0)) : 0;
+    return { ...j, from_invoices: !!draws, collected, unbilled: round2(j.unbilled), owed: round2(j.owed), contract_total: draws ? contractTotal : 0, to_bill: toBill,
       draws_paid: draws ? draws.filter((d) => d.status === 'paid').length : null, draws_total: draws ? draws.length : null,
       draw_flags: draws ? draws.filter((d) => d.flag).map((d) => `Draw ${d.n}: ${d.flag}`) : [],
       vehicle_cost: vehicle, total_cost: cost, profit,
@@ -450,7 +462,7 @@ async function overview() {
   const lm = await q(`SELECT COALESCE(SUM(CASE WHEN kind='income' AND category NOT IN ${NOT_REVENUE} THEN amount END),0) AS income,
        COALESCE(SUM(CASE WHEN kind='expense' AND category NOT IN ${NOT_OPERATING} THEN amount END),0) AS expense
      FROM transactions WHERE date BETWEEN $1 AND $2`, [iso(lmStart), iso(lmEnd)]);
-  const active = await q(`SELECT COUNT(*)::int AS n FROM jobs WHERE status='active'`);
+  const active = await q(`SELECT COUNT(*)::int AS n FROM jobs WHERE status='active' AND draws IS NOT NULL`);
   const unbilled = await q(`SELECT COALESCE(SUM(amount * (1 + COALESCE(markup_pct,0)/100)),0) AS v FROM transactions WHERE billable AND NOT billed`);
   const week = await q(`SELECT COALESCE(SUM(est_earned),0) AS est, COUNT(*) FILTER (WHERE met='yes')::int AS met,
      COUNT(*) FILTER (WHERE met IS NOT NULL)::int AS judged FROM daily_logs WHERE date > $1::date - 7`, [today]);
@@ -460,7 +472,7 @@ async function overview() {
     receivables: { total: round2(invoices.reduce((s, i) => s + i.balance, 0)), count: invoices.length,
       overdue: invoices.filter((i) => i.status === 'overdue').length, items: invoices.slice(0, 6) },
     unbilled: round2(unbilled.rows[0].v),
-    backlog: await (async () => { const js = (await listJobs()).filter((j) => j.status === 'active');
+    backlog: await (async () => { const js = (await listJobs()).filter((j) => j.status === 'active' && j.from_invoices);
       return { to_bill: round2(js.reduce((a, j) => a + j.to_bill, 0)), jobs: js.filter((j) => j.to_bill > 0).length,
         flags: js.flatMap((j) => j.draw_flags.map((f) => `${j.name} · ${f}`)) }; })(),
     tax: { net_profit: tax.net_profit, estimate: tax.estimate.total, paid: tax.estimate.paid, remaining: tax.estimate.remaining,

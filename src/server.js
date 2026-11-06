@@ -201,6 +201,14 @@ app.post('/api/invoices/import-backup', upload.single('file'), wrap(async (req, 
   res.json(r);
 }));
 app.get('/api/estimates', wrap(async (req, res) => res.json(await S.listEstimates())));
+// Numbers check: each tab's figures side by side, plus anything that could make them wrong.
+const CHECK = require('./check');
+app.get('/api/check', wrap(async (req, res) => res.json(await CHECK.numbersCheck())));
+app.post('/api/jobs/:id/merge', wrap(async (req, res) => {
+  const r = await CHECK.mergeJob(req.params.id, req.body.into);
+  await SEC.audit('job.merge', `#${req.params.id} → ${r.into}`, ip(req));
+  res.json(r);
+}));
 
 // ---------- jobs, crew, time ----------
 app.get('/api/jobs', wrap(async (req, res) => res.json(await S.listJobs())));

@@ -2,6 +2,8 @@
 const crypto = require('crypto');
 const { q, resolveJob, getSettings } = require('./db');
 const S = require('./services');
+// The same project/payment rules the invoice app uses, so the two always agree.
+const LCP = require('../public/invoice-app/projects.js');
 
 const num = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -39,21 +41,35 @@ function jobNameFor(st) {
   if (lot) return [`Lot ${lot}`, project || client].filter(Boolean).join(' · ').slice(0, 120);
   return (project ? `${project} · ${client}` : client || 'Untitled job').slice(0, 120);
 }
-// Find or create the project for an invoice/estimate. Name clashes (same lot # for two clients) get the client added.
-async function jobFor(st, { status = 'active' } = {}) {
-  const key = jobKeyFor(st);
+// Find or create the Cockpit project for one invoice project (an invoice plus its "Bill next draw" follow-ups).
+// Projects made by an older version of this sync (one per lot) are taken over by the first project for that lot,
+// so expenses, hours and miles you attached to them stay put.
+async function projectJob(pid, recs, stats) {
+  const present = recs.slice().sort((x, y) => (LCP.drawIdx(y.st) - LCP.drawIdx(x.st)) || String(y.updatedAt || '').localeCompare(String(x.updatedAt || '')))[0];
+  const first = recs.slice().sort((x, y) => String(x.createdAt || '').localeCompare(String(y.createdAt || '')) || (LCP.drawIdx(x.st) - LCP.drawIdx(y.st)))[0];
+  const st = present.st;
   if (!clean(st.client?.name) && !clean(st.project) && !lotOf(st)) return null;
-  const found = (await q('SELECT id FROM jobs WHERE ext_key=$1', [key])).rows[0];
+  const key = `project:${pid}`;
   const client = clean(st.client?.name) || null; const lot = lotOf(st); const site = siteOf(st);
+  let found = (await q('SELECT id FROM jobs WHERE ext_key=$1', [key])).rows[0];
+  if (!found) {
+    const legacy = (await q('SELECT id FROM jobs WHERE ext_key=$1', [jobKeyFor(st)])).rows[0];
+    if (legacy && !stats.claimed.has(legacy.id)) { await q('UPDATE jobs SET ext_key=$2 WHERE id=$1', [legacy.id, key]); found = legacy; }
+  }
   if (found) {
-    await q('UPDATE jobs SET client=COALESCE($2, client), lot=$3, address=COALESCE($4, address) WHERE id=$1', [found.id, client, lot, site]);
+    stats.claimed.add(found.id);
+    await q(`UPDATE jobs SET client=COALESCE($2, client), lot=$3, address=COALESCE($4, address), pricing='fixed', source='invoice-app',
+      status=CASE WHEN status IN ('lead','estimating','lost') THEN 'active' ELSE status END WHERE id=$1`, [found.id, client, lot, site]);
     return found.id;
   }
-  let name = jobNameFor(st);
-  if ((await q('SELECT 1 FROM jobs WHERE lower(name)=lower($1)', [name])).rows.length) name = `${name} · ${client || key}`.slice(0, 150);
-  for (let n = 2; (await q('SELECT 1 FROM jobs WHERE lower(name)=lower($1)', [name])).rows.length; n++) name = `${jobNameFor(st)} (${n})`;
-  const { rows } = await q(`INSERT INTO jobs (name, client, address, status, pricing, source, ext_key, lot) VALUES ($1,$2,$3,$4,'fixed','invoice-app',$5,$6) RETURNING id`,
-    [name, client, site, status, key, lot]);
+  // Same lot and project as another project: the first invoice number tells them apart.
+  const base = jobNameFor(st);
+  let name = base;
+  if ((await q('SELECT 1 FROM jobs WHERE lower(name)=lower($1)', [name])).rows.length) name = `${base} · ${String(first.st.invNo || '').trim()}`.slice(0, 150);
+  for (let n = 2; (await q('SELECT 1 FROM jobs WHERE lower(name)=lower($1)', [name])).rows.length; n++) name = `${base} · ${String(first.st.invNo || '').trim()} (${n})`.slice(0, 150);
+  const { rows } = await q(`INSERT INTO jobs (name, client, address, status, pricing, source, ext_key, lot) VALUES ($1,$2,$3,'active','fixed','invoice-app',$4,$5) RETURNING id`,
+    [name, client, site, key, lot]);
+  stats.claimed.add(rows[0].id);
   return rows[0].id;
 }
 // Bank/routing/account numbers never leave the invoice: long digit runs are hidden in what the Cockpit keeps.
@@ -102,6 +118,8 @@ function invoiceDetails(st, rec) {
       paid_or_request_date: toDate(d.date), check_no: clean(d.ck) || null })),
     extra_items: (st.items || []).filter((it) => clean(it.desc) || num(it.amt)).map((it) => ({ description: clean(it.desc), amount: num(it.amt) })),
     tax_rate_pct: num(st.taxRate), amount_due: invoiceTotal(rec), notes: redact(st.notes),
+    payment: rec.status === 'paid' ? { date_received: toDate(rec.payment && rec.payment.date), amount: rec.payment && num(rec.payment.amount) ? num(rec.payment.amount) : invoiceTotal(rec),
+      method: (rec.payment && rec.payment.method) || null, check_no: (rec.payment && clean(rec.payment.ck)) || null } : null,
   };
 }
 function estimateDetails(st) {
@@ -121,7 +139,9 @@ async function importEstimate(rec, source, stats) {
   const st = rec.st;
   const extId = `${source}:est:${rec.id}`;
   const wanted = String(st.estNo || '').trim() || `EST-${String(rec.id).slice(0, 6)}`;
-  const jobId = await jobFor(st, { status: rec.status === 'accepted' ? 'active' : rec.status === 'declined' ? 'lost' : 'estimating' });
+  // Estimates are bids, not projects: only invoices make projects. An estimate is linked to a project when an
+  // invoice project for the same client and lot exists.
+  const jobId = stats.lotJobs[`${clean(st.client?.name).toLowerCase()}|${lotOf(st) || ''}`] || null;
   stats.est_ids.push(extId);
   const items = [];
   for (const sec of st.sections || []) for (const it of sec.items || []) {
@@ -139,14 +159,6 @@ async function importEstimate(rec, source, stats) {
     await q(`INSERT INTO estimates (est_no, job_id, client, project, est_date, valid_until, total, status, items, scope, details, source, external_id, updated_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())`, [...vals, source, extId]);
   }
-  if (jobId) {
-    stats.jobs_touched.add(jobId);
-    // An accepted estimate makes the job active with the bid as its contract (unless set by hand).
-    if (rec.status === 'accepted') await q(`UPDATE jobs SET status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END,
-        contract_amount=COALESCE(contract_amount,$2), pricing='fixed', source=COALESCE(source,'estimate') WHERE id=$1`, [jobId, num(rec.total)]);
-    else if (['draft', 'sent'].includes(rec.status)) await q(`UPDATE jobs SET status=CASE WHEN status='lead' THEN 'estimating' ELSE status END WHERE id=$1`, [jobId]);
-    else if (rec.status === 'declined') await q(`UPDATE jobs SET status=CASE WHEN status IN ('lead','estimating') THEN 'lost' ELSE status END WHERE id=$1`, [jobId]);
-  }
   stats.estimates++;
 }
 
@@ -163,16 +175,12 @@ function dueDateFor(terms, invDate, graceDays) {
 }
 const drawIndex = (st) => Math.max(0, Math.min(num(st.currentIdx), (st.draws || []).length - 1));
 
-async function importInvoice(rec, source, stats) {
+async function importInvoice(rec, source, stats, jobId) {
   const st = rec.st; const ci = drawIndex(st);
   const extId = `${source}:inv:${rec.id}`;
   const wanted = String(st.invNo).trim();
   const client = clean(st.client?.name) || null;
-  const jobId = await jobFor(st);
-  if (jobId) {
-    stats.jobs_touched.add(jobId);
-    await q(`UPDATE jobs SET pricing='fixed', status=CASE WHEN status IN ('lead','estimating') THEN 'active' ELSE status END WHERE id=$1`, [jobId]);
-  }
+  if (jobId) stats.jobs_touched.add(jobId);
   const amount = invoiceTotal(rec);
   const drawAmt = drawAmounts(st)[ci] || 0;
   const itemsTotal = r2((st.items || []).reduce((s2, it) => s2 + num(it.amt), 0));
@@ -220,21 +228,27 @@ function contractSchedule(recs, stats) {
     // Payment details recorded on the newest invoice that lists this draw as an earlier draw.
     const later = recs.filter((r) => drawIndex(r.st) > i).sort(byNew)[0];
     const ld = later ? (later.st.draws || [])[i] || {} : {};
-    const checkNo = String(ld.ck || '').trim() || null;
-    const paidDate = toDate(ld.date);
     const markedPaid = biller && biller.status === 'paid';
-    const paid = !!(markedPaid || checkNo);
+    const pay = (markedPaid && biller.payment) || {};
+    const laterCk = String(ld.ck || '').trim() || null;
+    const checkNo = String(pay.ck || '').trim() || laterCk;
+    const paid = !!(markedPaid || laterCk);
     let date = null; let note = '';
     if (paid) {
-      date = paidDate || (markedPaid ? (stats.marks[biller.id] || toDate(biller.updatedAt)) : null) || (billed && billed.issue_date);
-      note = paidDate ? '' : markedPaid ? ' · dated when marked Paid' : ' · no paid date entered';
+      // The date you entered when recording the payment; else the paid date typed on a later invoice; else the day it was marked Paid.
+      // (Older versions filled that paid date in with the earlier invoice's own date, so that one isn't trusted.)
+      const laterDate = laterCk && toDate(ld.date) !== toDate(biller && biller.st.invDate) ? toDate(ld.date) : null;
+      const typed = toDate(pay.date) || laterDate;
+      date = typed || (markedPaid ? (stats.marks[biller.id] || toDate(biller.updatedAt)) : null) || (billed && billed.issue_date);
+      note = typed ? '' : markedPaid ? ' · no payment date entered (dated the day it was marked Paid)' : ' · no paid date entered';
     }
+    const received = paid && num(pay.amount) > 0 ? r2(num(pay.amount)) : null;
     return {
       n: i + 1, label: d.label || `Draw ${i + 1}`, pct: st.mode === 'pct' ? num(d.val) : (num(st.proposal) ? r2(amounts[i] / num(st.proposal) * 100) : null),
       amount: amounts[i] || 0, status: paid ? 'paid' : billed ? 'billed' : 'scheduled',
       invoice_no: billed ? billed.invoice_no : null, billed_amount: billed ? billed.amount : null, items: billed ? billed.items : 0, tax: billed ? billed.tax : 0,
       issue_date: billed ? billed.issue_date : null, due_date: billed ? billed.due_date : null,
-      paid_date: paid ? date : null, check_no: checkNo, note,
+      paid_date: paid ? date : null, check_no: checkNo, note, received, method: pay.method || (checkNo ? 'check' : null),
       flag: !paid && later ? `${(stats.stored[later.id] || {}).invoice_no || 'A later invoice'} prints this draw under "Paid to date", but it isn't marked paid` : null,
       biller_id: biller ? biller.id : null,
     };
@@ -243,47 +257,59 @@ function contractSchedule(recs, stats) {
 }
 
 async function mirrorContracts(valid, source, stats) {
-  const groups = {};
-  for (const r of valid) (groups[jobKeyFor(r.st) || `#${r.id}`] ||= []).push(r);
   const keep = new Set(); const jobs = new Set();
-  for (const recs of Object.values(groups)) {
+  for (const recs of LCP.groups(valid).values()) {
     const c = contractSchedule(recs, stats);
     jobs.add(c.job_id ?? 'none');
     if (c.job_id) {
       const co = r2(c.schedule.reduce((s2, d) => s2 + (d.items || 0), 0));
-      await q(`UPDATE jobs SET contract_amount=$2, change_orders=$3, draws=$4, draws_synced_at=now() WHERE id=$1`,
-        [c.job_id, c.contract || null, co || null, JSON.stringify(c.schedule.map(({ biller_id, ...d }) => d))]);
+      // Every draw paid → the project is complete; a draw owed again (marked unpaid) → active again.
+      const done = c.schedule.length > 0 && c.schedule.every((d) => d.status === 'paid' && !(d.received != null && d.received < (d.billed_amount ?? d.amount) - 0.004));
+      await q(`UPDATE jobs SET contract_amount=$2, change_orders=$3, draws=$4, draws_synced_at=now(),
+          status=CASE WHEN $5 AND status='active' THEN 'complete' WHEN NOT $5 AND status='complete' THEN 'active' ELSE status END WHERE id=$1`,
+        [c.job_id, c.contract || null, co || null, JSON.stringify(c.schedule.map(({ biller_id, ...d }) => d)), done]);
     }
     for (const d of c.schedule) {
       if (d.status === 'scheduled') continue;
       const amount = d.billed_amount ?? d.amount;
       if (!(amount > 0)) continue;
       const ref = d.biller_id ? `${source}:invoice:${d.biller_id}` : `${source}:draw:${c.job_id ?? 'none'}:${d.n}`;
-      // A payment you entered by hand for this invoice wins; the synced row steps aside so nothing counts twice.
+      // A payment you entered by hand for this invoice wins; the synced row steps aside so nothing counts twice
+      // (the Numbers check lists these so you can move them to the Invoicing tab).
       if (d.invoice_no) {
         const manual = (await q(`SELECT 1 FROM transactions WHERE kind='income' AND created_by<>'sync' AND category<>$2 AND lower(invoice_no)=lower($1) LIMIT 1`,
           [d.invoice_no, S.AWAITING])).rows.length;
-        if (manual) continue;
+        if (manual) { stats.manual_payments.push(d.invoice_no); continue; }
       }
-      keep.add(ref);
       const label = `${d.label} (draw ${d.n} of ${c.schedule.length})`;
       const paid = d.status === 'paid';
-      const row = paid
-        ? { date: d.paid_date || d.issue_date || S.todayISO(), category: 'Contract Revenue', check_no: d.check_no, method: d.check_no ? 'check' : null,
-          memo: `${label} · paid${d.note}${d.issue_date ? ` · invoiced ${d.issue_date}` : ''} – from invoice app` }
-        : { date: d.issue_date || S.todayISO(), category: S.AWAITING, check_no: null, method: null,
-          memo: `${label} · awaiting payment${d.flag ? ' · printed as paid on a later invoice' : ''} – from invoice app` };
-      const full = { kind: 'income', amount, party: c.client, job_id: c.job_id, invoice_no: d.invoice_no, ...row };
-      const mine = (await q('SELECT id, category FROM transactions WHERE ext_ref=$1', [ref])).rows[0];
-      if (mine) {
-        // Keep a category you chose yourself for a paid row (e.g. Materials Reimbursement); otherwise follow the invoice.
-        const category = paid && mine.category !== S.AWAITING ? mine.category : row.category;
-        await q(`UPDATE transactions SET date=$2, amount=$3, category=$4, party=$5, job_id=$6, method=$7, check_no=$8, invoice_no=$9, memo=$10 WHERE id=$1`,
-          [mine.id, full.date, full.amount, category, full.party, full.job_id, full.method, full.check_no, full.invoice_no, full.memo]);
-        stats.ledger_updated++;
+      const rows = [];
+      if (paid) {
+        const got = d.received ?? amount;
+        rows.push({ ref, amount: got, date: d.paid_date || d.issue_date || S.todayISO(), category: 'Contract Revenue', check_no: d.check_no, method: d.method,
+          memo: `${label} · paid${d.note}${got < amount - 0.004 ? ` · short ${(amount - got).toFixed(2)}` : ''}${d.issue_date ? ` · invoiced ${d.issue_date}` : ''} – from invoice app` });
+        // Paid less than billed: the rest stays owed.
+        if (got < amount - 0.004) rows.push({ ref: `${ref}:rest`, amount: r2(amount - got), date: d.issue_date || S.todayISO(), category: S.AWAITING, check_no: null, method: null,
+          memo: `${label} · balance still owed after a short payment – from invoice app` });
       } else {
-        await S.addTransaction({ ...full, ext_ref: ref }, 'sync');
-        if (paid) stats.payments_added++; else stats.invoices_added++;
+        rows.push({ ref, amount, date: d.issue_date || S.todayISO(), category: S.AWAITING, check_no: null, method: null,
+          memo: `${label} · awaiting payment${d.flag ? ' · printed as paid on a later invoice' : ''} – from invoice app` });
+      }
+      for (const row of rows) {
+        keep.add(row.ref);
+        const full = { kind: 'income', amount: row.amount, party: c.client, job_id: c.job_id, invoice_no: d.invoice_no, date: row.date, category: row.category,
+          check_no: row.check_no, method: row.method, memo: row.memo };
+        const mine = (await q('SELECT id, category FROM transactions WHERE ext_ref=$1', [row.ref])).rows[0];
+        if (mine) {
+          // Keep a revenue category you chose yourself for a paid row (e.g. Materials Reimbursement); otherwise follow the invoice.
+          const category = row.category !== S.AWAITING && mine.category !== S.AWAITING ? mine.category : row.category;
+          await q(`UPDATE transactions SET date=$2, amount=$3, category=$4, party=$5, job_id=$6, method=$7, check_no=$8, invoice_no=$9, memo=$10 WHERE id=$1`,
+            [mine.id, full.date, full.amount, category, full.party, full.job_id, full.method, full.check_no, full.invoice_no, full.memo]);
+          stats.ledger_updated++;
+        } else {
+          await S.addTransaction({ ...full, ext_ref: row.ref }, 'sync');
+          if (row.category === S.AWAITING) stats.invoices_added++; else stats.payments_added++;
+        }
       }
       if (d.flag) stats.flags.push(`${d.invoice_no || c.client}: ${d.flag}`);
     }
@@ -302,20 +328,30 @@ async function mirrorContracts(valid, source, stats) {
 }
 
 async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'invoice-app', { full = false } = {}) {
-  const stats = { full, est_ids: [], jobs_removed: 0, invoices: 0, estimates: 0, payments_added: 0, invoices_added: 0, ledger_updated: 0, ledger_removed: 0, jobs_touched: new Set(), renamed: [], skipped: [], flags: [], stored: {}, settings: await getSettings() };
-  // One bad record never stops the rest of the sync.
+  const stats = { full, est_ids: [], jobs_removed: 0, invoices: 0, estimates: 0, payments_added: 0, invoices_added: 0, ledger_updated: 0, ledger_removed: 0,
+    jobs_touched: new Set(), claimed: new Set(), lotJobs: {}, renamed: [], skipped: [], flags: [], manual_payments: [], stored: {}, settings: await getSettings() };
   stats.marks = Object.fromEntries((await q('SELECT record_id, paid_on FROM paid_marks')).rows.map((r) => [r.record_id, r.paid_on]));
+  // One bad record never stops the rest of the sync.
   const safely = async (label, fn) => {
     try { await fn(); } catch (e) { stats.skipped.push(`${label}: ${e.message}`); console.error('Invoice-app sync skipped', label, e.message); }
   };
-  // Estimates first so jobs get their bid amount.
+  const valid = invoices.filter((r) => r && r.id && r.st && String(r.st.invNo || '').trim() && Array.isArray(r.st.draws) && r.st.draws.length);
+  // Projects come only from invoices: one per invoice project. Oldest first, so the first project on a lot keeps
+  // the project an older sync made for that lot.
+  const projects = [...LCP.groups(valid).entries()].sort(([, a], [, b]) =>
+    String(a.map((r) => r.createdAt || '').sort()[0] || '').localeCompare(String(b.map((r) => r.createdAt || '').sort()[0] || '')));
+  for (const [pid, recs] of projects) {
+    let jobId = null;
+    await safely(`Project ${recs[0].st.invNo}`, async () => { jobId = await projectJob(pid, recs, stats); });
+    const st0 = recs[0].st; const lk = `${clean(st0.client?.name).toLowerCase()}|${lotOf(st0) || ''}`;
+    if (jobId && lotOf(st0) && !stats.lotJobs[lk]) stats.lotJobs[lk] = jobId;
+    for (const rec of recs) await safely(`Invoice ${rec.st.invNo}`, () => importInvoice(rec, source, stats, jobId));
+  }
   for (const rec of estimates) {
     if (!rec || !rec.id || !rec.st) continue;
     await safely(`Estimate ${rec.st.estNo || rec.id}`, () => importEstimate(rec, source, stats));
   }
-  const valid = invoices.filter((r) => r && r.id && r.st && String(r.st.invNo || '').trim() && Array.isArray(r.st.draws) && r.st.draws.length);
-  for (const rec of valid) await safely(`Invoice ${rec.st.invNo}`, () => importInvoice(rec, source, stats));
-  // Invoices deleted in the app: voided here (not deleted) for jobs in this sync; they come back if the app sends them again.
+  // Invoices deleted in the app: voided here (not deleted); they come back if the app sends them again.
   await safely('Removed invoices', async () => {
     const ids = valid.map((r) => `${source}:inv:${r.id}`);
     if (full) {
@@ -327,22 +363,28 @@ async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'inv
     }
   });
   await safely('Ledger', () => mirrorContracts(valid.filter((r) => stats.stored[r.id]), source, stats));
-  // Projects the app no longer feeds (e.g. two lots that an older sync had merged into one): emptied ones are removed,
-  // ones with your own entries (expenses, hours, miles) are kept and just lose their draw schedule.
+  // Projects no invoice feeds any more (deleted invoices, or projects older versions made from estimates or from
+  // merged lots): empty ones are removed; ones holding your own entries (expenses, hours, miles) are kept, lose their
+  // draw schedule, and show in the Numbers check so you can move those entries.
   if (full) await safely('Projects', async () => {
     const { rows } = await q(`SELECT j.id,
-        EXISTS (SELECT 1 FROM transactions t WHERE t.job_id=j.id) AS has_tx,
+        EXISTS (SELECT 1 FROM transactions t WHERE t.job_id=j.id AND t.created_by<>'sync') AS has_tx,
         EXISTS (SELECT 1 FROM time_entries te WHERE te.job_id=j.id) OR EXISTS (SELECT 1 FROM mileage m WHERE m.job_id=j.id) AS has_work
-      FROM jobs j WHERE (j.source IN ('invoice-app','estimate') OR j.draws_synced_at IS NOT NULL)
-        AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.job_id=j.id AND NOT i.void)
-        AND NOT EXISTS (SELECT 1 FROM estimates e WHERE e.job_id=j.id)`);
+      FROM jobs j WHERE (j.source IN ('invoice-app','estimate') OR j.draws_synced_at IS NOT NULL OR j.ext_key IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.job_id=j.id AND NOT i.void)`);
     for (const j of rows) {
-      if (!j.has_tx && !j.has_work) { await q('UPDATE invoices SET job_id=NULL WHERE job_id=$1', [j.id]); await q('DELETE FROM jobs WHERE id=$1', [j.id]); stats.jobs_removed++; }
-      else await q('UPDATE jobs SET draws=NULL, change_orders=NULL, draws_synced_at=NULL WHERE id=$1', [j.id]);
+      if (!j.has_tx && !j.has_work) {
+        await q('UPDATE invoices SET job_id=NULL WHERE job_id=$1', [j.id]); await q('UPDATE estimates SET job_id=NULL WHERE job_id=$1', [j.id]);
+        await q(`DELETE FROM transactions WHERE job_id=$1 AND created_by='sync'`, [j.id]);
+        await q('DELETE FROM jobs WHERE id=$1', [j.id]); stats.jobs_removed++;
+      // A per-lot project from an older version keeps its lot key, so the first invoice project on that lot can take it over.
+      } else await q(`UPDATE jobs SET draws=NULL, change_orders=NULL, draws_synced_at=NULL, contract_amount=NULL,
+          ext_key=CASE WHEN ext_key LIKE '%|lot:%' THEN ext_key ELSE NULL END, source='manual' WHERE id=$1`, [j.id]);
     }
   });
   return { invoices: stats.invoices, estimates: stats.estimates, payments_added: stats.payments_added, invoices_added: stats.invoices_added, ledger_updated: stats.ledger_updated,
-    ledger_removed: stats.ledger_removed, jobs: stats.jobs_touched.size, jobs_removed: stats.jobs_removed, renamed: stats.renamed, skipped: stats.skipped, flags: stats.flags };
+    ledger_removed: stats.ledger_removed, jobs: stats.jobs_touched.size, jobs_removed: stats.jobs_removed, renamed: stats.renamed, skipped: stats.skipped, flags: stats.flags,
+    manual_payments: stats.manual_payments };
 }
 
 // ---------- bank / card CSV ----------
@@ -398,7 +440,8 @@ async function autoMatch() {
   let n = 0;
   for (const b of rows) {
     const kind = b.amount > 0 ? 'income' : 'expense';
-    const m = await q(`SELECT t.id FROM transactions t WHERE t.kind=$1 AND abs(t.amount - $2) < 0.01 AND abs(t.date - $3::date) <= 4
+    // Deposits often land days after the check date, so income gets a wider window.
+    const m = await q(`SELECT t.id FROM transactions t WHERE t.kind=$1 AND t.category<>'Invoiced – Awaiting Payment' AND abs(t.amount - $2) < 0.01 AND abs(t.date - $3::date) <= ${b.amount > 0 ? 21 : 4}
       AND NOT t.reconciled AND NOT EXISTS (SELECT 1 FROM bank_rows br WHERE br.tx_id=t.id) ORDER BY abs(t.date - $3::date) LIMIT 1`, [kind, Math.abs(b.amount), b.date]);
     if (m.rows[0]) {
       await q(`UPDATE bank_rows SET status='matched', tx_id=$2 WHERE id=$1`, [b.id, m.rows[0].id]);
@@ -409,18 +452,24 @@ async function autoMatch() {
   return n;
 }
 async function applyBankDecisions(decisions, createdBy = 'manual') {
-  let added = 0; let ignored = 0;
+  let added = 0; let ignored = 0; const skipped = [];
   for (const d of decisions || []) {
     const { rows } = await q(`SELECT * FROM bank_rows WHERE id=$1 AND status='new'`, [d.row_id]);
     const b = rows[0]; if (!b) continue;
     if (d.action === 'ignore') { await q(`UPDATE bank_rows SET status='ignored' WHERE id=$1`, [b.id]); ignored++; continue; }
+    // A deposit that matches an invoice from the Invoicing tab is that invoice's payment, not new income.
+    if (b.amount > 0 && !d.force) {
+      const inv = (await q(`SELECT invoice_no FROM invoices WHERE source='invoice-app' AND NOT void AND abs(amount - $1) < 0.01
+        AND (issue_date IS NULL OR $2::date BETWEEN issue_date - 7 AND issue_date + 120) ORDER BY abs($2::date - COALESCE(issue_date, $2::date)) LIMIT 1`, [b.amount, b.date])).rows[0];
+      if (inv) { skipped.push(`${b.date} ${b.amount.toFixed(2)} matches invoice ${inv.invoice_no} – mark that invoice paid in the Invoicing tab instead`); continue; }
+    }
     const t = await S.addTransaction({ kind: b.amount > 0 ? 'income' : 'expense', date: b.date, amount: Math.abs(b.amount), category: d.category,
       job_name: d.job_name || null, job_id: d.job_id || null, party: d.party || b.description, memo: `Bank: ${b.description}` }, createdBy);
     await q('UPDATE transactions SET reconciled=true WHERE id=$1', [t.id]);
     await q(`UPDATE bank_rows SET status='added', tx_id=$2 WHERE id=$1`, [b.id, t.id]);
     added++;
   }
-  return { added, ignored };
+  return { added, ignored, skipped };
 }
 
 module.exports = { importInvoiceApp, importBankCsv, autoMatch, applyBankDecisions, parseCsv };
