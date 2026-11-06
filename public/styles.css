@@ -205,6 +205,7 @@ details.tview summary { cursor: pointer; color: var(--muted); }
 .sched-detail td { background: var(--surface-2); color: var(--text-2); font-size: 13px; padding-left: 34px; }
 .note { font-size: 13px; color: var(--muted); }
 .callout { border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line)); background: var(--gold-soft); border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+.callout.ok { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); background: color-mix(in srgb, var(--good) 12%, transparent); }
 
 /* modal, fab, toast */
 .modal-wrap { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 50; display: grid; place-items: center; padding: 16px; }
@@ -335,3 +336,10 @@ body[data-tab="invoicing"] main { max-width: none; padding: 0; }
 #invoiceFrame { display: block; width: 100%; height: calc(100vh - 57px); border: 0; background: #f4f1ea; }
 body[data-tab="invoicing"] .fab, body[data-tab="invoicing"] .fab-menu { display: none; }
 @media (max-width: 760px) { #invoiceFrame { height: calc(100vh - 57px - 64px - env(safe-area-inset-bottom)); } }
+
+/* Numbers check: issue rows wrap their buttons under the text on narrow screens */
+.chk-li { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+.chk-li .chk-txt { flex: 1 1 260px; min-width: 0; }
+.chk-li .chk-acts { flex-shrink: 0; flex-wrap: wrap; max-width: 100%; }
+.chk-li .chk-acts select { width: 220px; max-width: 100%; min-width: 0; }
+.chk-li, .chk-li .chk-acts { min-width: 0; }
