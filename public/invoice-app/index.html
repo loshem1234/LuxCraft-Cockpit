@@ -11,6 +11,7 @@
 <script src="/vendor/jspdf.umd.min.js"></script>
 <script src="/api/books/store.js"></script>
 <script src="cockpit-store.js"></script>
+<script src="projects.js"></script>
 <style>
 /* Layout: brand bar with three tabs; the invoice tab pairs a form column with a live page preview. */
 :root{
@@ -136,6 +137,13 @@ td .sub{display:block;color:var(--muted);font-size:.8rem}
 .pill{display:inline-block;font:600 .7rem var(--f-body);letter-spacing:.05em;text-transform:uppercase;padding:3px 9px;border-radius:99px;border:1px solid currentColor;background:none;cursor:pointer}
 .pill.unpaid{color:var(--accent)} .pill.paid{color:var(--ok)}
 .acts{display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap}
+td .paidinfo{display:block;color:var(--muted);font-size:.76rem;margin-top:3px;white-space:nowrap}
+dialog.pay{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);padding:20px;width:min(440px,calc(100vw - 32px))}
+dialog.pay::backdrop{background:rgba(0,0,0,.45)}
+dialog.pay h3{font:400 1.25rem/1.2 var(--f-display);margin:0 0 4px}
+dialog.pay .row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+dialog.pay .foot{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
+dialog.pay .foot .sp{flex:1}
 .empty{padding:40px 20px;text-align:center;color:var(--muted)}
 .empty b{display:block;font:400 1.2rem var(--f-display);color:var(--ink);margin-bottom:6px}
 
@@ -276,6 +284,20 @@ td .sub{display:block;color:var(--muted);font-size:.8rem}
       <div class="empty" id="emptyList" hidden><b>No saved invoices yet</b>Every invoice you save is kept here so you can reopen it, download it again, or bill the next draw.</div>
     </div>
     <p class="msg" id="listMsg" style="margin-top:10px"></p>
+    <dialog class="pay" id="payDlg">
+      <form method="dialog" id="payForm">
+        <h3 id="payTitle">Record payment</h3>
+        <p class="note" id="payNote" style="margin:0"></p>
+        <div class="row">
+          <label>Date received<input type="date" id="payDate" required></label>
+          <label>Amount received $<input type="number" id="payAmt" class="num" min="0" step="0.01" required></label>
+          <label>Method<select id="payMethod"><option value="check">Check</option><option value="ach">ACH / wire</option><option value="zelle">Zelle</option><option value="cash">Cash</option><option value="card">Card</option><option value="other">Other</option></select></label>
+          <label>Check #<input id="payCk" class="num" placeholder="Optional"></label>
+        </div>
+        <p class="msg err" id="payErr"></p>
+        <div class="foot"><button type="button" class="btn small danger" id="payUnmark">Mark unpaid</button><span class="sp"></span><button type="button" class="btn" id="payCancel">Cancel</button><button type="submit" class="btn primary" id="paySave">Save as paid</button></div>
+      </form>
+    </dialog>
   </section>
 
   <!-- ============ SETTINGS ============ -->
@@ -792,6 +814,7 @@ function saveRecord(){
     if(isFinite(m) && m>=num(s.next)){ s.next = m+1; store.settings = s; }
   }
   st.example=false; $("exampleNote").hidden=true;
+  reconcileProjects();
   const ok = persist();
   $("listCount").textContent = store.invoices.length;
   refreshBanners();
@@ -818,6 +841,68 @@ document.addEventListener("keydown", e=>{
   if((e.ctrlKey||e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase()==="s" && !$("view-new").hidden){ e.preventDefault(); saveOnly(); }
 });
 
+/* ================= projects & payments ================= */
+// Same rules as the Cockpit (projects.js): a check # typed for an earlier draw marks that draw's invoice Paid,
+// and a recorded payment is printed on later invoices of the same project.
+function reconcileProjects(){
+  if(!window.LCProjects) return 0;
+  const ids = LCProjects.reconcile(store.invoices, {today: iso(new Date())});
+  const now = new Date().toISOString();
+  ids.forEach(id=>{ const r=store.invoices.find(x=>x.id===id); if(r) r.updatedAt=now; });
+  if(editingId && ids.includes(editingId)){ const r=store.invoices.find(x=>x.id===editingId); if(r){ st.draws = JSON.parse(JSON.stringify(r.st.draws)); renderDraws(); } }
+  return ids.length;
+}
+const projectOf = rec => window.LCProjects ? LCProjects.assign(store.invoices).get(rec.id) : rec.id;
+const METHOD = {check:"Check", ach:"ACH / wire", zelle:"Zelle", cash:"Cash", card:"Card", other:"Other"};
+function paidLine(r){
+  const p = r.payment || {}; const bits=[];
+  if(p.date) bits.push(fmtDate(p.date,true));
+  if(p.ck) bits.push("Ck "+p.ck); else if(p.method && p.method!=="check") bits.push(METHOD[p.method]||p.method);
+  if(p.amount!=null && round2(num(p.amount))!==round2(num(r.total))) bits.push(money(num(p.amount)));
+  return bits.length ? bits.join(" · ") : "no date entered";
+}
+let payRec = null;
+function openPay(rec){
+  payRec = rec;
+  const p = rec.payment || {};
+  const ci = Math.min(rec.st.currentIdx, rec.st.draws.length-1);
+  $("payTitle").textContent = (rec.status==="paid" ? "Payment for " : "Record payment · ") + rec.st.invNo;
+  $("payNote").textContent = `${rec.st.client.name}${rec.st.project?" · "+rec.st.project:""} · Draw #${ci+1} of ${rec.st.draws.length} · ${money(num(rec.total))} due`;
+  $("payDate").value = p.date || iso(new Date());
+  $("payAmt").value = p.amount!=null ? p.amount : num(rec.total);
+  $("payMethod").value = p.method || "check";
+  $("payCk").value = p.ck || "";
+  $("payErr").textContent = "";
+  $("payUnmark").hidden = rec.status!=="paid";
+  $("paySave").textContent = rec.status==="paid" ? "Save" : "Save as paid";
+  $("payDlg").showModal();
+  $("payDate").focus();
+}
+$("payCancel").addEventListener("click", ()=>$("payDlg").close());
+$("payForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const rec = payRec; if(!rec) return;
+  const date = $("payDate").value, amt = num($("payAmt").value);
+  if(!date){ $("payErr").textContent="Enter the date the payment came in."; return; }
+  if(!(amt>0)){ $("payErr").textContent="Enter the amount received."; return; }
+  const ck = $("payCk").value.trim();
+  rec.status = "paid";
+  rec.payment = {date, amount: round2(amt), method: $("payMethod").value, ck};
+  rec.updatedAt = new Date().toISOString();
+  reconcileProjects(); persist(); renderList(); $("payDlg").close();
+  $("listMsg").className="msg ok"; $("listMsg").textContent = `${rec.st.invNo} marked paid ${fmtDate(date)}${ck?" · Ck "+ck:""}.`;
+});
+$("payUnmark").addEventListener("click", ()=>{
+  const rec = payRec; if(!rec) return;
+  const pid = projectOf(rec); const i = Math.min(rec.st.currentIdx, rec.st.draws.length-1);
+  const map = LCProjects.assign(store.invoices); const now = new Date().toISOString();
+  // Clear this draw's check/date on later invoices too, or they'd mark it paid again.
+  store.invoices.forEach(r=>{ if(r!==rec && map.get(r.id)===pid && Math.min(r.st.currentIdx, r.st.draws.length-1)>i && r.st.draws[i]){ r.st.draws[i].ck=""; r.st.draws[i].date=""; r.updatedAt=now; } });
+  rec.status="unpaid"; delete rec.payment; rec.updatedAt=now;
+  persist(); renderList(); $("payDlg").close();
+  $("listMsg").className="msg"; $("listMsg").textContent = `${rec.st.invNo} marked unpaid.`;
+});
+
 /* ================= saved invoices ================= */
 function renderList(){
   const q = $("search").value.trim().toLowerCase();
@@ -835,7 +920,7 @@ function renderList(){
       <td>${esc(s.client.name)}<span class="sub">${esc(s.project||s.client.a1||"")}</span></td>
       <td>#${ci+1} of ${s.draws.length}</td>
       <td class="r num">${money(num(r.total))}</td>
-      <td><button type="button" class="pill ${r.status==="paid"?"paid":"unpaid"}" data-act="status" title="Click to change">${r.status==="paid"?"Paid":"Unpaid"}</button></td>
+      <td><button type="button" class="pill ${r.status==="paid"?"paid":"unpaid"}" data-act="status" title="${r.status==="paid"?"See or change the payment":"Record the payment (date, amount, check #)"}">${r.status==="paid"?"Paid":"Unpaid"}</button>${r.status==="paid"?`<span class="paidinfo">${esc(paidLine(r))}</span>`:""}</td>
       <td><div class="acts">
         <button type="button" class="btn small" data-act="open">Open</button>
         <button type="button" class="btn small" data-act="pdf">PDF</button>
@@ -851,16 +936,24 @@ $("rows").addEventListener("click", async e=>{
   const b=e.target.closest("[data-act]"); if(!b) return;
   const id=b.closest("tr").dataset.id; const rec=store.invoices.find(r=>r.id===id); if(!rec) return;
   const act=b.dataset.act;
-  if(act==="status"){ rec.status = rec.status==="paid"?"unpaid":"paid"; persist(); renderList(); }
+  if(act==="status"){ openPay(rec); }
   else if(act==="open"){ st=JSON.parse(JSON.stringify(rec.st)); editingId=rec.id; $("msg").textContent=""; fillForm(); show("new"); }
   else if(act==="pdf"){ await downloadRecord(rec.st, rec.biz, $("listMsg")); }
   else if(act==="next"){
     const n = JSON.parse(JSON.stringify(rec.st)); const s=S();
     const ci = Math.min(n.currentIdx, n.draws.length-1);
-    if(!n.draws[ci].date) n.draws[ci].date = n.invDate;
-    n.currentIdx = ci+1; n.draws[n.currentIdx].date = "";
+    // The next draw continues this invoice's project.
+    n.contractId = projectOf(rec);
+    // The earlier draw shows the payment recorded on its invoice; if none is recorded yet, its date and check # are left
+    // blank for you to fill in (they mark it paid when you save).
+    const p = rec.status==="paid" ? (rec.payment||{}) : null;
+    n.draws[ci].date = p ? (p.date||"") : ""; n.draws[ci].ck = p ? (p.ck||"") : "";
+    n.currentIdx = ci+1; n.draws[n.currentIdx].date = ""; n.draws[n.currentIdx].ck = "";
     n.invNo = s.prefix + s.next; n.invDate = iso(new Date()); n.items = []; n.example=false;
-    st = n; editingId = null; $("msg").className="msg"; $("msg").textContent=`Draw #${ci+1} marked as received. Add its check number if you have it.`;
+    st = n; editingId = null;
+    $("msg").className="msg";
+    $("msg").textContent = p ? `Draw #${ci+1} (${rec.st.invNo}) was paid${p.date?" "+fmtDate(p.date):""}. This is the invoice for draw #${ci+2}.`
+      : `${rec.st.invNo} (draw #${ci+1}) isn't marked paid. If it has been, enter its paid date and check # below – saving marks it paid.`;
     fillForm(); show("new");
   }
   else if(act==="del"){
@@ -915,6 +1008,7 @@ let fromEstimate = store.draft && store.draft.fromEstimate;
 if(fromEstimate){ delete store.draft.fromEstimate; persist(); }
 if(store.draft && store.draft.st){ st = store.draft.st; editingId = store.draft.editingId && store.invoices.some(r=>r.id===store.draft.editingId) ? store.draft.editingId : null; }
 else st = blankInvoice(store.invoices.length===0);
+if(reconcileProjects()) persist();
 fillSettings();
 fillForm();
 $("listCount").textContent = store.invoices.length;
