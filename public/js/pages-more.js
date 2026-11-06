@@ -35,23 +35,25 @@ state.pages.jobs = async function renderJobs() {
   if (sub === 'estimates') return renderEstimates(el, head);
   if (sub === 'crew') return renderCrew(el, head);
   const jobs = await api('/api/jobs');
-  const active = jobs.filter((j) => j.status === 'active');
+  const active = jobs.filter((j) => j.status === 'active' && j.from_invoices);
+  const others = jobs.filter((j) => !j.from_invoices);
   const done = jobs.filter((j) => j.status === 'complete' && j.margin !== null);
   el.innerHTML = `${head}
     <div class="kpis">
-      <div class="kpi accent"><div class="l">Active jobs</div><div class="v">${active.length}</div><div class="s">${money0(active.reduce((a, j) => a + (j.contract_amount || 0), 0))} under contract</div></div>
+      <div class="kpi accent"><div class="l">Active jobs</div><div class="v">${active.length}</div><div class="s">${money0(active.reduce((a, j) => a + j.contract_total, 0))} under contract · from invoices</div></div>
       <div class="kpi"><div class="l">Billed, not paid</div><div class="v">${money0(jobs.reduce((a, j) => a + j.owed, 0))}</div><div class="s">unpaid draws</div></div>
       <div class="kpi"><div class="l">Still to bill</div><div class="v">${money0(active.reduce((a, j) => a + j.to_bill, 0))}</div><div class="s">scheduled draws on active jobs</div></div>
       <div class="kpi"><div class="l">Unbilled materials</div><div class="v">${money0(jobs.reduce((a, j) => a + j.unbilled, 0))}</div><div class="s">incl. markup</div></div>
       <div class="kpi"><div class="l">Avg. margin (done)</div><div class="v">${pct(avg(done.map((j) => j.margin)))}</div><div class="s">${done.length} completed jobs</div></div>
     </div>
+    ${others.length ? `<div class="callout" style="margin-bottom:12px">${others.length} job${others.length === 1 ? ' isn\'t' : 's aren\'t'} from an invoice (made by hand, by an agent, or by an older version from an estimate). They don't count toward contracts, owed or still to bill. <button class="link" data-go-check>Review in the Numbers check</button></div>` : ''}
     <div class="filters"><select id="jStatus">${[['open', 'Open jobs'], ['all', 'All jobs'], ['lead', 'Leads'], ['estimating', 'Estimating'], ['active', 'Active'], ['complete', 'Complete'], ['lost', 'Lost']].map(([v, l]) => `<option value="${v}" ${(state.jobFilter || 'open') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div class="table-wrap"><table>
       <thead><tr><th>Job</th><th>Status</th><th class="n">Contract</th><th class="n">Collected</th><th class="n">Owed</th><th class="n hide-sm">To bill</th><th class="n hide-sm">Costs</th><th class="n">Profit</th><th class="n hide-sm">Your hrs</th><th class="n">$/hr</th><th></th></tr></thead>
       <tbody>${jobs.filter((j) => { const f = state.jobFilter || 'open'; return f === 'all' || (f === 'open' ? !['complete', 'lost'].includes(j.status) : j.status === f); }).map((j) => {
         const budgetPct = j.budget_cost ? j.total_cost / j.budget_cost : null;
         return `<tr class="clickable" data-job="${j.id}">
-        <td><b>${esc(j.name)}</b><div class="note">${esc(j.client || '')}${j.estimate ? ` · ${esc(j.estimate.est_no)} ${money0(j.estimate.total)}` : ''}${j.unbilled ? ` · <span class="down">${money0(j.unbilled)} materials to bill</span>` : ''}${j.draws_total ? ` · ${j.draws_paid} of ${j.draws_total} draws paid` : ''}</div>
+        <td><b>${esc(j.name)}</b><div class="note">${j.from_invoices ? '' : '<span class="tag warn">not from an invoice</span> '}${esc(j.client || '')}${j.estimate ? ` · ${esc(j.estimate.est_no)} ${money0(j.estimate.total)}` : ''}${j.unbilled ? ` · <span class="down">${money0(j.unbilled)} materials to bill</span>` : ''}${j.draws_total ? ` · ${j.draws_paid} of ${j.draws_total} draws paid` : ''}</div>
           ${j.contract_total ? drawBar(j) : ''}${j.draw_flags.length ? `<div class="note warn-text">⚠ ${esc(j.draw_flags[0])}</div>` : ''}</td>
         <td><span class="chip">${j.status}</span>${budgetPct !== null && budgetPct > 0.9 ? `<div class="note ${budgetPct > 1 ? 'neg' : ''}">${pct(budgetPct)} of budget</div>` : ''}</td>
         <td class="n">${j.contract_total ? money0(j.contract_total) : '—'}${j.change_orders ? `<div class="note">incl. ${money0(j.change_orders)} change orders</div>` : ''}</td><td class="n">${money0(j.income)}</td>
@@ -65,6 +67,7 @@ state.pages.jobs = async function renderJobs() {
   $('#jobNew').addEventListener('click', () => jobModal());
   $('#jobHours').addEventListener('click', () => hoursModal());
   $('#jStatus').addEventListener('change', (e) => { state.jobFilter = e.target.value; renderJobs(); });
+  $('[data-go-check]', el)?.addEventListener('click', () => { state.sub = 'check'; showTab('financials'); });
   $$('[data-je]', el).forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); jobModal(jobs.find((j) => j.id === Number(b.dataset.je))); }));
   $$('[data-job]', el).forEach((r) => r.addEventListener('click', () => jobDetail(jobs.find((j) => j.id === Number(r.dataset.job)), walt)));
 };

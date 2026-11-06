@@ -94,7 +94,7 @@ state.pages['fin-ledger'] = async function renderLedger() {
         <label>${qk === 'income' ? 'Paid by' : 'Vendor / payee'}<input name="party" list="partyList"></label>
         <label>Method<select name="method">${methodOptions(qk === 'income' ? 'check' : '')}</select></label>
         <label>Check #<input name="check_no" inputmode="numeric"></label>
-        ${qk === 'income' ? '<label>Invoice #<input name="invoice_no" placeholder="LC-" list="invList"></label>' : `<label class="check-label"><input type="checkbox" name="billable"> Client reimburses</label>`}
+        ${qk === 'income' ? '<p class="note wide" style="margin:0">Invoice payments go on the <button type="button" class="link" data-go="invoicing">Invoicing tab</button> (click the invoice\'s Unpaid button). Add income here only when there was no invoice.</p>' : `<label class="check-label"><input type="checkbox" name="billable"> Client reimburses</label>`}
         <label class="wide">Memo<input name="memo" placeholder="Optional note"></label>
         <label>&nbsp;<button class="btn primary" type="submit">Add ${qk}</button></label>
       </form>
@@ -150,8 +150,8 @@ state.pages['fin-ledger'] = async function renderLedger() {
   if ($('#fFrom')) { $('#fFrom').addEventListener('change', (e) => set('from', e.target.value)); $('#fTo').addEventListener('change', (e) => set('to', e.target.value)); }
   if ($('#markBilled')) $('#markBilled').addEventListener('click', async () => { await api('/api/transactions/mark-billed', { method: 'POST', body: { ids: rows.map((r) => r.id) } }); toast('Marked billed'); renderLedger(); });
   $$('[data-edit]', el).forEach((b) => b.addEventListener('click', () => txModal(rows.find((r) => r.id === Number(b.dataset.edit)))));
+  wireGoTo(el);
   $('#partyList').innerHTML = [...new Set(rows.map((r) => r.party).filter(Boolean))].slice(0, 60).map((p) => `<option value="${esc(p)}">`).join('');
-  api('/api/invoices?status=unpaid').then((inv) => { const l = $('#invList'); if (l) l.innerHTML = inv.map((i) => `<option value="${esc(i.invoice_no)}">${esc(i.client || '')} · ${money(i.balance)} due</option>`).join(''); }).catch(() => {});
 };
 
 // Add/edit transaction, with split mode, reimbursable materials and sales tax.
@@ -170,6 +170,7 @@ function txModal(t = {}, opts = {}) {
     <h2>${isEdit ? 'Edit' : 'New'} ${kind === 'income' ? 'income' : 'expense'}${split ? ' · split' : ''}</h2>
     ${opts.aiNote ? `<div class="ai-note">${opts.aiNote}</div>` : ''}
     ${t.split_group && isEdit ? '<div class="ai-note">This line is one part of a split receipt. Editing changes only this part.</div>' : ''}
+    ${kind === 'income' && !isEdit ? '<div class="ai-note">Payments for invoices are recorded on the Invoicing tab (click the invoice\'s Unpaid button), so they\'re only counted once. Use this only for money that had no invoice.</div>' : ''}
     ${t.created_by === 'sync' && isEdit ? '<div class="ai-note">Synced from the invoice app. The amount, dates and check # follow the invoice on every sync, so change those in the invoice app. Once it is paid, you can change its category here.</div>' : ''}
     <form id="txForm" class="form-grid">
       <label>Date<input type="date" name="date" value="${t.date || today()}" required></label>
@@ -178,7 +179,7 @@ function txModal(t = {}, opts = {}) {
       <label>${kind === 'income' ? 'Paid by' : 'Vendor / payee'}<input name="party" value="${esc(t.party || '')}"></label>
       <label>Method<select name="method">${methodOptions(t.method)}</select></label>
       <label>Check #<input name="check_no" value="${esc(t.check_no || '')}"></label>
-      ${kind === 'income' ? `<label>Invoice #<input name="invoice_no" value="${esc(t.invoice_no || '')}"></label>` : ''}
+      ${kind === 'income' && isEdit && t.invoice_no ? `<label>Invoice #<input name="invoice_no" value="${esc(t.invoice_no || '')}"></label>` : ''}
       ${kind === 'expense' ? `<label>Sales tax paid<input type="number" step="0.01" name="sales_tax" value="${t.sales_tax ?? ''}"></label>
         <label class="check-label"><input type="checkbox" name="untaxed" ${t.untaxed ? 'checked' : ''}> No sales tax charged</label>` : ''}
       ${kind === 'expense' && !split ? `<label class="check-label"><input type="checkbox" name="billable" ${t.billable ? 'checked' : ''}> Client reimburses</label>
@@ -250,12 +251,13 @@ $('#receiptInput').addEventListener('change', async (e) => {
 state.pages['fin-invoices'] = async function renderInvoices() {
   const el = $('#fin-invoices');
   const all = await api('/api/invoices');
-  const voided = all.filter((i) => i.status === 'void');
-  const inv = state.showVoid ? all : all.filter((i) => i.status !== 'void');
+  const voided = all.filter((i) => i.status === 'void' && i.counted);
+  const outside = all.filter((i) => !i.counted && i.status !== 'void');
+  const inv = all.filter((i) => i.counted && (state.showVoid || i.status !== 'void'));
   const unpaid = inv.filter((i) => ['open', 'partial', 'overdue'].includes(i.status));
   el.innerHTML = `
-    <div class="page-head"><div><h2>Invoices</h2><div class="sub-title">From the Invoicing tab – every save shows here right away. Mark draws Paid there.</div></div>
-      <div class="row"><button class="btn" id="invBackup" title="Upload the invoice or estimate app's Export backup file">⇪ Import app backup</button><button class="btn" id="invUpload">⇪ Upload PDF</button><button class="btn primary" id="invNew">New invoice</button></div></div>
+    <div class="page-head"><div><h2>Invoices</h2><div class="sub-title">Straight from the Invoicing tab – the only place invoices and their payments are entered. Record a payment there by clicking an invoice's Unpaid button.</div></div>
+      <div class="row"><button class="btn" id="invBackup" title="Upload the invoice or estimate app's Export backup file">⇪ Import app backup</button><button class="btn primary" data-go="invoicing">Open Invoicing</button></div></div>
     <div class="kpis">
       <div class="kpi accent"><div class="l">Outstanding</div><div class="v">${money(unpaid.reduce((a, i) => a + i.balance, 0))}</div><div class="s">${unpaid.length} invoices</div></div>
       <div class="kpi"><div class="l">Overdue</div><div class="v ${inv.some((i) => i.status === 'overdue') ? 'neg' : ''}">${money(inv.filter((i) => i.status === 'overdue').reduce((a, i) => a + i.balance, 0))}</div><div class="s">${inv.filter((i) => i.status === 'overdue').length} past due</div></div>
@@ -269,24 +271,22 @@ state.pages['fin-invoices'] = async function renderInvoices() {
         <td class="hide-sm mono">${fmtDate(i.issue_date)}</td><td class="hide-sm mono">${fmtDate(i.due_date)}${i.terms ? `<div class="note">${esc(i.terms)}</div>` : ''}</td>
         <td class="n">${money(i.amount)}${(i.items_total || i.tax) ? `<div class="note">${money(i.draw_amount)} draw${i.items_total ? ` + ${money(i.items_total)} items` : ''}${i.tax ? ` + ${money(i.tax)} tax` : ''}</div>` : ''}</td><td class="n hide-sm" title="${esc((i.payments || []).map((p) => `${p.date} ${money(p.amount)}${p.check_no ? ' #' + p.check_no : ''}`).join('\n'))}">${money(i.paid)}</td>
         <td class="n"><b>${money(i.balance)}</b></td><td><span class="chip ${i.status}">${i.status}</span>${i.days_out > 0 && !['paid', 'void'].includes(i.status) ? `<div class="note">${i.days_out}d out</div>` : ''}</td>
-        <td class="actions">${i.source === 'invoice-app' ? (!['paid', 'void'].includes(i.status) ? '<span class="note" title="Mark the invoice Paid in the invoice app (or enter the check # on the next invoice) and it updates here on the next sync.">Mark Paid in invoice app</span>' : '') : !['paid', 'void'].includes(i.status) ? `<button class="btn sm" data-pay="${i.id}">Record check</button>` : ''}${i.attachment_id ? `<a class="btn sm ghost" href="/api/attachments/${i.attachment_id}" target="_blank" rel="noopener">📄</a>` : ''}${i.source === 'invoice-app' ? '' : `<button class="btn sm ghost" data-ie="${i.id}">Edit</button>`}</td></tr>`).join('')
+        <td class="actions">${(i.payments || []).length ? `<span class="note">${esc(i.payments.map((p) => `${fmtDate(p.date)}${p.check_no ? ' · Ck ' + p.check_no : ''}`).join(', '))}</span>` : ''}</td></tr>`).join('')
         : '<tr><td colspan="9" class="empty">No invoices yet. Create them on the Invoicing tab, or import the old app\'s backup file.</td></tr>'}</tbody></table></div>
+    ${outside.length ? `<div class="card" style="margin-top:14px"><h3>Not from the Invoicing tab · not counted</h3><p class="note">Entered by hand or read from an uploaded PDF before invoices moved into the Cockpit. They're left out of what you're owed. Delete any that are copies of an invoice in the Invoicing tab.</p>
+      <div class="list">${outside.map((i) => `<div class="li"><div><b>${esc(i.invoice_no)}</b> · ${esc(i.client || i.job_name || '')}<div class="meta">${fmtDate(i.issue_date)} · ${money(i.amount)}</div></div><div class="row"><button class="btn sm ghost" data-ie="${i.id}">Edit</button><button class="btn sm danger ghost" data-idel="${i.id}">Delete</button></div></div>`).join('')}</div></div>` : ''}
     ${voided.length ? `<p class="note"><button class="link" id="toggleVoid">${state.showVoid ? 'Hide' : 'Show'} ${voided.length} voided / deleted in the invoice app</button></p>` : ''}
     <input type="file" id="backupInput" accept="application/json,.json" hidden>`;
-  $('#invNew').addEventListener('click', () => invoiceModal());
+  wireGoTo(el);
+  $$('[data-idel]', el).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Delete this invoice? Ledger entries stay.')) return; await api(`/api/invoices/${b.dataset.idel}`, { method: 'DELETE' }); refreshAfterChange(); }));
   $('#toggleVoid')?.addEventListener('click', () => { state.showVoid = !state.showVoid; state.pages['fin-invoices'](); });
-  $('#invUpload').addEventListener('click', () => $('#invoiceInput').click());
   $('#invBackup').addEventListener('click', () => $('#backupInput').click());
   $('#backupInput').addEventListener('change', async (e) => {
     const file = e.target.files[0]; if (!file) return;
     const fd = new FormData(); fd.append('file', file);
     try { const r = await api('/api/invoices/import-backup', { method: 'POST', body: fd }); toast(`Imported ${r.invoices} invoices and ${r.estimates} estimates · ledger updated${r.renamed && r.renamed.length ? ` · duplicate numbers kept as ${r.renamed.join(', ')}` : ''}${r.skipped && r.skipped.length ? ` · skipped ${r.skipped.length}: ${r.skipped.join('; ')}` : ''}`, !!(r.skipped && r.skipped.length)); refreshAfterChange(); } catch (err) { fail(err); }
   });
-  $$('[data-pay]', el).forEach((b) => b.addEventListener('click', () => {
-    const i = inv.find((x) => x.id === Number(b.dataset.pay));
-    txModal({ kind: 'income', amount: i.balance, category: 'Contract Revenue', invoice_no: i.invoice_no, party: i.client, job_id: i.job_id, method: 'check' });
-  }));
-  $$('[data-ie]', el).forEach((b) => b.addEventListener('click', () => invoiceModal(inv.find((x) => x.id === Number(b.dataset.ie)))));
+  $$('[data-ie]', el).forEach((b) => b.addEventListener('click', () => invoiceModal(all.find((x) => x.id === Number(b.dataset.ie)))));
 };
 function avgDaysToPay(inv) {
   const d = inv.filter((i) => i.status === 'paid' && i.issue_date && i.payments.length).map((i) => (Date.parse(i.payments[i.payments.length - 1].date) - Date.parse(i.issue_date)) / 86400000);
@@ -361,7 +361,7 @@ state.pages['fin-bank'] = async function renderBank() {
   $$('[data-badd],[data-bign]', el).forEach((b) => b.addEventListener('click', async () => {
     const tr = b.closest('tr'); const id = Number(tr.dataset.row);
     const d = b.hasAttribute('data-bign') ? { row_id: id, action: 'ignore' } : { row_id: id, action: 'add', category: $('.b-cat', tr).value, job_id: $('.b-job', tr).value || null };
-    try { await api('/api/bank/decide', { method: 'POST', body: { rows: [d] } }); renderBank(); } catch (err) { fail(err); }
+    try { const r = await api('/api/bank/decide', { method: 'POST', body: { rows: [d] } }); if (r.skipped && r.skipped.length) toast(r.skipped.join(' · '), true); renderBank(); } catch (err) { fail(err); }
   }));
 };
 
@@ -466,3 +466,49 @@ window.addEventListener('message', (e) => {
   if (e.origin !== location.origin || !e.data || e.data.type !== 'lc-books-saved') return;
   loadMeta().catch(() => {});
 });
+
+// ================= NUMBERS CHECK =================
+// Every headline figure, as each tab works it out, side by side – and anything that would make them wrong.
+state.pages['fin-check'] = async function renderCheck() {
+  const el = $('#fin-check');
+  el.innerHTML = '<p class="note"><span class="spinner"></span> Checking every number…</p>';
+  const c = await api('/api/check');
+  const projects = c.projects;
+  const bad = c.comparisons.filter((x) => !x.ok).length;
+  const high = c.issues.filter((i) => i.severity === 'high').length;
+  const drawStatus = (d) => d.status === 'paid' ? `<span class="chip paid">paid ${d.paid_date ? fmtDate(d.paid_date) : ''}</span>${d.check_no ? ` <span class="note">Ck ${esc(d.check_no)}</span>` : ''}`
+    : d.status === 'billed' ? `<span class="chip open">billed ${d.issue_date ? fmtDate(d.issue_date) : ''}</span>` : '<span class="chip">scheduled</span>';
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Numbers check</h2><div class="sub-title">Income and projects come only from the Invoicing tab. This page shows each figure the way every tab works it out, so you can see they agree.</div></div>
+      <div class="row"><button class="btn" id="chkRefresh">Re-check</button></div></div>
+    <div class="callout ${bad || high ? '' : 'ok'}" style="margin-bottom:14px">${bad || high
+      ? `<b>${bad ? `${bad} figure${bad === 1 ? '' : 's'} disagree` : 'Every figure agrees'}${high ? ` · ${high} thing${high === 1 ? '' : 's'} to fix` : ''}.</b> Work down the list below – each item says what to do.`
+      : `<b>Everything agrees.</b> ${c.counts.app_invoices} invoice${c.counts.app_invoices === 1 ? '' : 's'} in the Invoicing tab → ${c.counts.projects} project${c.counts.projects === 1 ? '' : 's'}.`}</div>
+    <div class="grid g3">${c.comparisons.map((x) => `<div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(x.name)}</h3><span class="chip ${x.ok ? 'paid' : 'overdue'}">${x.ok ? 'agrees' : 'differs'}</span></div><p class="note">${esc(x.note)}</p>
+      <div class="list">${x.values.map((v) => `<div class="li"><span>${esc(v.where)}${v.plus ? `<div class="meta">+ ${money(v.plus)} ${esc(v.plusLabel)}</div>` : ''}</span><b class="num">${money(v.v)}</b></div>`).join('')}</div></div>`).join('')}</div>
+    <div class="card" style="margin-top:14px"><h3>To check or fix (${c.issues.length})</h3>
+      ${c.issues.length ? `<div class="list">${c.issues.map((i, n) => `<div class="li chk-li"><div class="chk-txt"><span class="chip ${i.severity === 'high' ? 'overdue' : i.severity === 'medium' ? 'open' : ''}">${i.severity === 'high' ? 'fix' : i.severity === 'medium' ? 'check' : 'info'}</span> <b>${esc(i.title)}</b><div class="meta" style="white-space:normal">${esc(i.detail)}</div></div>
+        <div class="row chk-acts">${i.tx_id ? `<button class="btn sm ghost" data-ctx="${i.tx_id}">Open</button><button class="btn sm danger ghost" data-cdel="${i.tx_id}">Delete</button>` : ''}
+          ${i.invoice_id ? `<button class="btn sm danger ghost" data-cidel="${i.invoice_id}">Delete</button>` : ''}
+          ${i.type === 'other_job' ? `${i.counts.tx + i.counts.hrs + i.counts.mi ? `<select class="c-into" data-n="${n}"><option value="">Move entries to…</option>${projects.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select><button class="btn sm" data-cmerge="${i.job_id}" data-n="${n}">Move</button>` : `<button class="btn sm danger ghost" data-cjdel="${i.job_id}">Delete</button>`}` : ''}
+          ${['dup_number', 'same_lot', 'unreadable'].includes(i.type) || (i.type === 'manual_income' && i.severity === 'high') ? '<button class="btn sm" data-go="invoicing">Invoicing</button>' : ''}</div></div>`).join('')}</div>`
+        : '<p class="note">Nothing to fix.</p>'}</div>
+    <div class="card" style="margin-top:14px"><h3>Projects, from the Invoicing tab (${projects.length})</h3>
+      <p class="note">Each invoice starts its own project. "Bill next draw" adds the next invoice to the same project. Contract = collected + owed + still to bill.</p>
+      ${projects.length ? projects.map((p) => `<details class="proj" style="border-top:1px solid var(--line);padding:10px 0"><summary style="cursor:pointer"><b>${esc(p.name)}</b> <span class="note">${esc(p.client || '')} · ${p.status}</span>
+          <span class="row" style="gap:14px;flex-wrap:wrap;margin-top:4px"><span class="note">Contract <b class="num">${money(p.contract)}</b></span><span class="note">Collected <b class="num">${money(p.collected)}</b></span><span class="note">Owed <b class="num">${money(p.owed)}</b></span><span class="note">To bill <b class="num">${money(p.to_bill)}</b></span>${p.issues.length ? `<span class="chip overdue">${p.issues.length} to check</span>` : ''}</span></summary>
+        ${p.issues.length ? `<div class="callout" style="margin:8px 0">${p.issues.map(esc).join('<br>')}</div>` : ''}
+        <div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>Draw</th><th>Invoice</th><th class="n">Amount</th><th>Status</th></tr></thead><tbody>${p.draws.map((d) => `<tr><td>${d.n}. ${esc(d.label)}</td><td class="mono">${d.invoice_no ? esc(d.invoice_no) : '—'}</td>
+          <td class="n">${money(d.billed_amount ?? d.amount)}${d.received != null && d.received !== (d.billed_amount ?? d.amount) ? `<div class="note">received ${money(d.received)}</div>` : ''}</td><td>${drawStatus(d)}</td></tr>`).join('')}</tbody></table></div></details>`).join('')
+        : '<p class="note">No invoices in the Invoicing tab yet.</p>'}</div>`;
+  wireGoTo(el);
+  $('#chkRefresh').addEventListener('click', () => renderCheck());
+  $$('[data-ctx]', el).forEach((b) => b.addEventListener('click', async () => { const rows = await api(`/api/transactions?kind=income&limit=5000`); const t = rows.find((r) => r.id === Number(b.dataset.ctx)); if (t) txModal(t); }));
+  $$('[data-cdel]', el).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Delete this ledger entry?')) return; await api(`/api/transactions/${b.dataset.cdel}`, { method: 'DELETE' }); toast('Deleted'); renderCheck(); }));
+  $$('[data-cidel]', el).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Delete this invoice? Ledger entries stay.')) return; await api(`/api/invoices/${b.dataset.cidel}`, { method: 'DELETE' }); toast('Deleted'); renderCheck(); }));
+  $$('[data-cjdel]', el).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Delete this empty job?')) return; await api(`/api/jobs/${b.dataset.cjdel}`, { method: 'DELETE' }); toast('Deleted'); loadMeta().catch(() => {}); renderCheck(); }));
+  $$('[data-cmerge]', el).forEach((b) => b.addEventListener('click', async () => {
+    const into = $(`.c-into[data-n="${b.dataset.n}"]`, el).value; if (!into) return toast('Pick the project to move them into', true);
+    try { const r = await api(`/api/jobs/${b.dataset.cmerge}/merge`, { method: 'POST', body: { into } }); toast(`Moved into ${r.into}`); loadMeta().catch(() => {}); renderCheck(); } catch (e) { fail(e); }
+  }));
+};
