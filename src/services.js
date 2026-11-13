@@ -226,10 +226,48 @@ async function addTimeEntries(date, entries) {
   }
   return out;
 }
-async function listTimeEntries({ from, to, job_id } = {}) {
+// Weekly timesheet: replace one person's hours for one Monday–Sunday week in a single step, so the grid on
+// Jobs → Crew & hours is always exactly what's stored (no doubled days from saving twice).
+async function setWeekHours(worker, monday, entries) {
+  worker = String(worker || 'Me').trim() || 'Me';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(monday || ''))) throw Object.assign(new Error('Pick a week'), { status: 400 });
+  const start = new Date(monday + 'T12:00:00Z');
+  if (start.getUTCDay() !== 1) throw Object.assign(new Error('A week starts on Monday'), { status: 400 });
+  const sunday = new Date(start.getTime() + 6 * 86400000).toISOString().slice(0, 10);
+  const rows = [];
+  for (const e of entries || []) {
+    const hours = Math.round(Number(e.hours) * 100) / 100;
+    if (!(hours > 0)) continue;
+    if (hours > 24) throw Object.assign(new Error(`${e.date}: more than 24 hours in a day`), { status: 400 });
+    if (!(e.date >= monday && e.date <= sunday)) throw Object.assign(new Error(`${e.date} isn't in this week`), { status: 400 });
+    rows.push({ date: e.date, hours, job_id: e.job_id ? await resolveJob(e.job_id) : null, note: e.note ? String(e.note).slice(0, 300) : null,
+      est_earned: e.est_earned === '' || e.est_earned == null ? null : Number(e.est_earned) });
+  }
+  const perDay = {}; rows.forEach((r) => { perDay[r.date] = (perDay[r.date] || 0) + r.hours; });
+  const over = Object.entries(perDay).find(([, h]) => h > 24);
+  if (over) throw Object.assign(new Error(`${over[0]}: more than 24 hours in a day`), { status: 400 });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (worker !== 'Me') await client.query(`INSERT INTO workers (name, role) VALUES ($1,'helper') ON CONFLICT (name) DO NOTHING`, [worker]);
+    await client.query('DELETE FROM time_entries WHERE worker=$1 AND date BETWEEN $2 AND $3', [worker, monday, sunday]);
+    for (const r of rows) await client.query('INSERT INTO time_entries (date, worker, job_id, hours, est_earned, note) VALUES ($1,$2,$3,$4,$5,$6)',
+      [r.date, worker, r.job_id, r.hours, r.est_earned, r.note]);
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
+  return { worker, from: monday, to: sunday, entries: rows.length, hours: Math.round(rows.reduce((a, r) => a + r.hours, 0) * 100) / 100 };
+}
+// Hours per person per week, for the "previous weeks" list.
+async function weeklyHours(weeks = 12) {
+  const { rows } = await q(`SELECT to_char(date_trunc('week', date), 'YYYY-MM-DD') AS week, worker, SUM(hours)::float AS hours, COUNT(DISTINCT date)::int AS days
+     FROM time_entries WHERE date >= date_trunc('week', CURRENT_DATE) - ($1::int * interval '1 week') GROUP BY 1, 2 ORDER BY 1 DESC, 2`, [weeks]);
+  return rows;
+}
+async function listTimeEntries({ from, to, job_id, worker } = {}) {
   const { rows } = await q(`SELECT te.*, j.name AS job_name FROM time_entries te LEFT JOIN jobs j ON j.id=te.job_id
      WHERE ($1::date IS NULL OR te.date >= $1) AND ($2::date IS NULL OR te.date <= $2) AND ($3::int IS NULL OR te.job_id=$3)
-     ORDER BY te.date DESC, te.id DESC LIMIT 1000`, [from || null, to || null, job_id || null]);
+       AND ($4::text IS NULL OR te.worker=$4)
+     ORDER BY te.date DESC, te.id DESC LIMIT 1000`, [from || null, to || null, job_id || null, worker || null]);
   return rows;
 }
 
@@ -485,6 +523,6 @@ async function overview() {
 
 module.exports = {
   AWAITING, round2, todayISO, mileageRateFor, addTransaction, updateTransaction, addSplit, listTransactions, listInvoices, upsertInvoice,
-  listEstimates, listJobs, upsertJob, addMileage, listMileage, addTimeEntries, listTimeEntries, taxSummary, estimateTaxes,
+  listEstimates, listJobs, upsertJob, addMileage, listMileage, addTimeEntries, listTimeEntries, setWeekHours, weeklyHours, taxSummary, estimateTaxes,
   analytics, periodSummary, overview, LINE_LABELS,
 };

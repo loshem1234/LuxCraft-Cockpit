@@ -228,6 +228,9 @@ app.post('/api/workers', wrap(async (req, res) => {
 }));
 app.get('/api/time', wrap(async (req, res) => res.json(await S.listTimeEntries(req.query))));
 app.post('/api/time', wrap(async (req, res) => res.json(await S.addTimeEntries(req.body.date, req.body.entries || [req.body]))));
+// Weekly timesheet (Jobs → Crew & hours).
+app.get('/api/time/weeks', wrap(async (req, res) => res.json(await S.weeklyHours(Math.min(52, Number(req.query.weeks) || 12)))));
+app.put('/api/time/week', wrap(async (req, res) => res.json(await S.setWeekHours(req.body.worker, req.body.from, req.body.entries))));
 app.delete('/api/time/:id', wrap(async (req, res) => { await q('DELETE FROM time_entries WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 
 // ---------- mileage ----------
