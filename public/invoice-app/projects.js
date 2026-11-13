@@ -6,6 +6,9 @@
    they are clearly the same contract: same client, billing address, job site, project, contract amount and number of
    draws, and a later draw number. Two invoices for the same draw are never the same project, even on the same lot.
 
+   The Cockpit's "Which invoices belong to the same job" rule can switch this to one job per client + lot number
+   (mode 'lot'). An invoice Clara pinned to a job (st.contractPinned) stays with it whatever the rule says.
+
    PAID: an invoice is paid when it is marked Paid (rec.status === 'paid'). The payment's date, check # and amount are
    kept on the invoice (rec.payment). */
 (function (root, factory) {
@@ -21,10 +24,22 @@
     return [c.name, c.a1, c.a2, st.project, st.site1, st.site2, num(st.proposal).toFixed(2), (st.draws || []).length].map(clean).join('|');
   }
 
-  // Map of invoice record id → project id.
-  function assign(invoices) {
-    const recs = (invoices || []).filter((r) => r && r.id && r.st);
+  function lotOf(st) {
+    for (const f of [st.site1, st.site2, st.project]) { const m = String(f || '').match(/\blot\s*(?:#|no\.?|number)?\s*(\d+[a-z]?)\b/i); if (m) return m[1].toLowerCase(); }
+    return null;
+  }
+
+  // Map of invoice record id → project id. mode: 'invoice_chain' (default) or 'lot'.
+  function assign(invoices, { mode = 'invoice_chain' } = {}) {
+    const all = (invoices || []).filter((r) => r && r.id && r.st);
     const out = new Map();
+    // Pinned by Clara (with Loshem's approval) – always wins.
+    for (const r of all) if (r.st.contractPinned && r.st.contractId) out.set(r.id, String(r.st.contractId));
+    let recs = all.filter((r) => !out.has(r.id));
+    if (mode === 'lot') {
+      for (const r of recs) { const lot = lotOf(r.st); if (lot) out.set(r.id, `lot:${clean(r.st.client && r.st.client.name)}|${lot}`); }
+      recs = recs.filter((r) => !out.has(r.id));
+    }
     const byCreated = (a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || (drawIdx(a.st) - drawIdx(b.st));
     // 1) Older invoices without a project id: chain them by matching details.
     const groups = new Map();
@@ -42,8 +57,8 @@
     return out;
   }
 
-  function groups(invoices) {
-    const map = assign(invoices); const g = new Map();
+  function groups(invoices, opts) {
+    const map = assign(invoices, opts); const g = new Map();
     for (const r of invoices || []) { if (!r || !map.has(r.id)) continue; const p = map.get(r.id); if (!g.has(p)) g.set(p, []); g.get(p).push(r); }
     return g;
   }
@@ -54,13 +69,15 @@
   //  - a check # typed on a later invoice for an earlier draw marks that draw's invoice Paid with that date/check;
   //  - a payment recorded on an invoice is copied onto later invoices' draw lines, so their PDFs print it.
   // Returns the ids of records it changed.
-  function reconcile(invoices, { today } = {}) {
+  function reconcile(invoices, { today, mode, laterCheck = true } = {}) {
     const changed = new Set();
-    const day = today || new Date().toISOString().slice(0, 10);
+    // Payments link draw-by-draw within one contract (an invoice and its "Bill next draw" follow-ups), even when the
+    // grouping rule puts several contracts in one job – otherwise one contract's check could mark another's draw paid.
+    void mode;
     for (const list of groups(invoices).values()) {
       const billerOf = (i) => list.filter((r) => drawIdx(r.st) === i).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
-      // later → earlier
-      for (const later of list) {
+      // later → earlier (unless the "check # on a later invoice" rule is off)
+      if (laterCheck) for (const later of list) {
         const ci = drawIdx(later.st);
         for (let i = 0; i < ci; i++) {
           const d = (later.st.draws || [])[i] || {};
@@ -89,5 +106,5 @@
     return [...changed];
   }
 
-  return { assign, groups, reconcile, legacyKey, drawIdx, isPaid };
+  return { assign, groups, reconcile, legacyKey, drawIdx, isPaid, lotOf };
 }));

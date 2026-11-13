@@ -844,15 +844,18 @@ document.addEventListener("keydown", e=>{
 /* ================= projects & payments ================= */
 // Same rules as the Cockpit (projects.js): a check # typed for an earlier draw marks that draw's invoice Paid,
 // and a recorded payment is printed on later invoices of the same project.
+// The Cockpit's books rules (Settings → Books rules) decide how invoices group into jobs.
+const LC_RULES = (window.__LC_BOOKS && window.__LC_BOOKS.rules) || {};
+const PMODE = { mode: LC_RULES.project_grouping || "invoice_chain" };
 function reconcileProjects(){
   if(!window.LCProjects) return 0;
-  const ids = LCProjects.reconcile(store.invoices, {today: iso(new Date())});
+  const ids = LCProjects.reconcile(store.invoices, {today: iso(new Date()), mode: PMODE.mode, laterCheck: LC_RULES.later_check_marks_paid !== "no"});
   const now = new Date().toISOString();
   ids.forEach(id=>{ const r=store.invoices.find(x=>x.id===id); if(r) r.updatedAt=now; });
   if(editingId && ids.includes(editingId)){ const r=store.invoices.find(x=>x.id===editingId); if(r){ st.draws = JSON.parse(JSON.stringify(r.st.draws)); renderDraws(); } }
   return ids.length;
 }
-const projectOf = rec => window.LCProjects ? LCProjects.assign(store.invoices).get(rec.id) : rec.id;
+const projectOf = rec => window.LCProjects ? LCProjects.assign(store.invoices, PMODE).get(rec.id) : rec.id;
 const METHOD = {check:"Check", ach:"ACH / wire", zelle:"Zelle", cash:"Cash", card:"Card", other:"Other"};
 function paidLine(r){
   const p = r.payment || {}; const bits=[];
@@ -895,7 +898,7 @@ $("payForm").addEventListener("submit", e=>{
 $("payUnmark").addEventListener("click", ()=>{
   const rec = payRec; if(!rec) return;
   const pid = projectOf(rec); const i = Math.min(rec.st.currentIdx, rec.st.draws.length-1);
-  const map = LCProjects.assign(store.invoices); const now = new Date().toISOString();
+  const map = LCProjects.assign(store.invoices, PMODE); const now = new Date().toISOString();
   // Clear this draw's check/date on later invoices too, or they'd mark it paid again.
   store.invoices.forEach(r=>{ if(r!==rec && map.get(r.id)===pid && Math.min(r.st.currentIdx, r.st.draws.length-1)>i && r.st.draws[i]){ r.st.draws[i].ck=""; r.st.draws[i].date=""; r.updatedAt=now; } });
   rec.status="unpaid"; delete rec.payment; rec.updatedAt=now;
