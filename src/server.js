@@ -12,6 +12,7 @@ const F = require('./files');
 const IMP = require('./importers');
 const TTS = require('./tts');
 const BOOKS = require('./books');
+const RULES = require('./rules');
 const fs = require('fs');
 
 const app = express();
@@ -103,9 +104,12 @@ const aiLimit = SEC.rateLimit({ windowMs: 60000, max: 30 });
 // The app loads its data with this script (before its own code runs), then saves each change back.
 app.get('/api/books/store.js', wrap(async (req, res) => {
   const data = await BOOKS.loadAll();
+  const r = await RULES.getRules();
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  const safe = JSON.stringify({ ok: true, data }).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  // The app groups invoices into jobs and links payments by the same books rules as the Cockpit.
+  const rules = { project_grouping: r.project_grouping, later_check_marks_paid: r.later_check_marks_paid };
+  const safe = JSON.stringify({ ok: true, data, rules }).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   res.send(`window.__LC_BOOKS=${safe};`);
 }));
 app.put('/api/books/:key', wrap(async (req, res) => {
@@ -119,14 +123,14 @@ app.put('/api/books/:key', wrap(async (req, res) => {
 app.get('/api/meta', wrap(async (req, res) => {
   const [cats, jobs, settings, workers, agents, pending] = await Promise.all([
     q('SELECT * FROM categories ORDER BY kind DESC, sort, name'),
-    q(`SELECT id, name, client, status FROM jobs ORDER BY status='complete', status='lost', created_at DESC`),
+    q(`SELECT id, name, client, status, draws IS NOT NULL AS from_invoices FROM jobs ORDER BY status='complete', status='lost', created_at DESC`),
     getSettings(), q('SELECT * FROM workers ORDER BY id'), A.agentConfig(),
     q(`SELECT COUNT(*)::int AS n FROM proposals WHERE status='pending'`),
   ]);
   const agentInfo = Object.fromEntries(Object.entries(agents).map(([id, a]) => [id, { id, name: a.name, title: a.title, page: a.page, voice: a.voice, style: a.style || '' }]));
   res.json({ categories: cats.rows, jobs: jobs.rows, workers: workers.rows, settings, agents: agentInfo,
     ai_enabled: !!process.env.ANTHROPIC_API_KEY, tts_enabled: TTS.enabled(), model: AI.MODEL, today: S.todayISO(),
-    line_labels: S.LINE_LABELS, pending_approvals: pending.rows[0].n, two_factor: !!(await SEC.twoFactor()) });
+    line_labels: S.LINE_LABELS, pending_approvals: pending.rows[0].n, two_factor: !!(await SEC.twoFactor()), rules: await RULES.getRules() });
 }));
 app.get('/api/overview', wrap(async (req, res) => res.json(await S.overview())));
 app.get('/api/analytics', wrap(async (req, res) => res.json(await S.analytics(req.query))));
@@ -201,6 +205,20 @@ app.post('/api/invoices/import-backup', upload.single('file'), wrap(async (req, 
   res.json(r);
 }));
 app.get('/api/estimates', wrap(async (req, res) => res.json(await S.listEstimates())));
+// Books rules: how invoices become jobs and numbers (also changeable by Clara with approval).
+app.get('/api/rules', wrap(async (req, res) => {
+  const r = await RULES.getRules();
+  const flags = (await q('SELECT id, agent, text, created_at FROM books_flags WHERE resolved_at IS NULL ORDER BY id DESC LIMIT 30')).rows;
+  res.json({ rules: RULES.describe(r), house_rules: r.house_rules, flags });
+}));
+app.put('/api/rules', wrap(async (req, res) => {
+  const b = req.body || {};
+  const r = await RULES.setRules({ changes: b.changes || {}, add_house_rules: b.add_house_rules || [], remove_house_rules: b.remove_house_rules || [] });
+  await SEC.audit('rules.change', JSON.stringify(b).slice(0, 300), ip(req));
+  res.json(r);
+}));
+app.post('/api/rules/flags/:id/resolve', wrap(async (req, res) => { await q('UPDATE books_flags SET resolved_at=now() WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
+
 // Numbers check: each tab's figures side by side, plus anything that could make them wrong.
 const CHECK = require('./check');
 app.get('/api/check', wrap(async (req, res) => res.json(await CHECK.numbersCheck())));

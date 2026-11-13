@@ -3,6 +3,8 @@ const { q, getSettings, resolveJob } = require('./db');
 const S = require('./services');
 const F = require('./files');
 const { claude, MODEL } = require('./ai');
+const RULES = require('./rules');
+const FIX = require('./booksfix');
 
 // ---------- the team ----------
 const AGENTS = {
@@ -22,7 +24,14 @@ You can do anything the specialists can, but for deep work point Loshem to the r
 - Ohio sales tax: as a remodeling contractor improving real property, he generally pays sales tax on materials when he buys them and does not charge it to clients. Record sales tax from receipts; flag purchases where no tax was charged (online/out of state) as untaxed – use tax may be due.
 - Bank/card CSV imports: match rows to existing entries; propose new entries for unmatched business rows; ignore personal or transfer rows.
 - Watch cash flow: receivables aging, overdue invoices, upcoming tax payments, big planned purchases. Point out duplicates and missing receipts.
-- Invoices sync from the Invoicing tab as progress draws on a project (get_jobs shows each project's draw schedule: paid / billed, unpaid / scheduled). A draw is paid only when Loshem records the payment on its invoice in the Invoicing tab (Unpaid button → date received, amount, check #) or types its check # on a later invoice. Billed-but-unpaid draws sit in the ledger as "Invoiced – Awaiting Payment" (not revenue yet). NEVER propose an income entry for a payment on an invoice – that would count it twice; tell him to record it on the invoice instead. If a deposit or income entry looks like a copy of an invoice payment, propose deleting the copy. The Financials → Numbers check page lists anything that doesn't add up.`,
+- Invoices sync from the Invoicing tab as progress draws on a job (get_jobs shows each job's draw schedule: paid / billed, unpaid / scheduled). Billed-but-unpaid draws sit in the ledger as "Invoiced – Awaiting Payment" (not revenue yet). Payments live on the invoice: NEVER propose an income entry for an invoice's payment – propose_invoice_edit with status paid and the payment instead.
+
+YOU OWN THE BOOKS. You are the only agent who can correct, delete or conform data, edit invoices and change the rules – always as approval cards Loshem reviews. The others send you problems with flag_for_clara (listed live below; close them with resolve_flag once handled).
+How to turn what Loshem says into changes:
+1. A standing instruction about how numbers or jobs should work ("only invoices make a job", "numbers only change when an invoice is created", "everything on one lot is one job"): call get_books_rules and match it to a rule. If a rule covers it, propose_rule_change. If it's a convention no rule can enforce, add it as a house rule AND tell him plainly which part the Cockpit enforces automatically and which part you'll apply by hand from now on. Never claim a rule exists that doesn't.
+2. A correction to specific records ("LC-45 is draw 2 of LC-40", "that $4,500 deposit is LC-41's check", "delete the test invoice", "Lot 262 trim is a duplicate"): read first (get_invoice_record, get_numbers_check, find_transactions, get_jobs), then propose_invoice_edit for invoices (one per invoice) and propose_data_fix for Cockpit records (batch related clean-ups in one card). Say in one sentence what will change and how the totals move.
+3. Not sure what he means, or the records could be read two ways (which job, which draw, paid or not, which of two duplicates to keep): ask ONE short, specific question first, naming the invoices/amounts/dates. When his answer is a general convention, also offer to save it as a house rule so you never have to ask again.
+4. After approval the Cockpit rebuilds every number. If he asks for a full clean-up, start from get_numbers_check, go through the problems highest first, and propose fixes in small, reviewable groups (not one giant card).`,
   },
   taxes: {
     title: 'Tax Specialist', name: 'Helen', voice: 'Leda', page: 'Taxes',
@@ -96,6 +105,9 @@ const READ_TOOLS = [
   { name: 'get_time_entries', description: 'Hours by person and job.', input_schema: { type: 'object', properties: { from: str('YYYY-MM-DD'), to: str('YYYY-MM-DD'), job_name: str('Job') } } },
   { name: 'get_bank_rows', description: 'Imported bank/card statement rows and whether each is matched to the ledger.', input_schema: { type: 'object', properties: { status: { type: 'string', enum: ['new', 'matched', 'added', 'ignored'] } } } },
   { name: 'search_documents', description: 'Search the documents Loshem uploaded to your knowledge folder.', input_schema: { type: 'object', properties: { query: str('Keywords') }, required: ['query'] } },
+  { name: 'get_books_rules', description: 'The books rules in effect (how invoices become jobs and numbers), every choice each rule allows, and the house rules.', input_schema: { type: 'object', properties: {} } },
+  { name: 'get_numbers_check', description: 'The Numbers check: each headline figure as every tab works it out (do they agree?), every job with its draws, and the list of problems (duplicates, hand-entered income, stray jobs, missing payment dates).', input_schema: { type: 'object', properties: {} } },
+  { name: 'get_invoice_record', description: 'An invoice exactly as saved in the Invoicing tab (all editable fields, draws, paid status and payment) and which other invoices share its job. Use before proposing an invoice edit.', input_schema: { type: 'object', properties: { invoice_no: str('Invoice number'), match_date: str('YYYY-MM-DD – only if two invoices share the number') }, required: ['invoice_no'] } },
 ];
 
 const PROPOSE_TOOLS = [
@@ -130,6 +142,38 @@ const PROPOSE_TOOLS = [
   { name: 'remember_fact', description: 'Propose saving a durable fact to the team\'s shared memory (preferences, rates, clients, decisions). All agents will see it.', input_schema: { type: 'object', properties: { text: str('The fact, one sentence') }, required: ['text'] } },
   { name: 'forget_fact', description: 'Propose removing a fact from shared memory by id.', input_schema: { type: 'object', properties: { id: { type: 'integer' }, reason: str('Why') }, required: ['id'] } },
 ];
+
+// Only the Bookkeeper changes the books: correcting, deleting and conforming data, editing invoices, and the rules.
+const BOOKS_KEEPER = 'financials';
+const KEEPER_ONLY = new Set(['propose_rule_change', 'propose_invoice_edit', 'propose_data_fix', 'propose_update_transaction', 'propose_delete_transaction', 'propose_invoice_change', 'propose_bank_entries']);
+const RULE_KEYS = Object.keys(RULES.RULES);
+const BOOKS_TOOLS = [
+  { name: 'propose_rule_change', description: `Propose changing how the whole Cockpit treats invoices and numbers (books rules), and/or adding or dropping house rules (free-text conventions every agent follows). Rule keys: ${RULE_KEYS.join(', ')} – call get_books_rules for the allowed values. Approval rebuilds every number from the invoices.`, input_schema: { type: 'object', properties: {
+    changes: { type: 'object', description: 'Rule key → new value', additionalProperties: true },
+    add_house_rules: { type: 'array', items: { type: 'string' }, description: 'New conventions, one sentence each, in Loshem\'s words' },
+    remove_house_rules: { type: 'array', items: { type: 'integer' }, description: 'House rule numbers (1-based) to drop' },
+    reason: str('What Loshem asked for') }, required: ['reason'] } },
+  { name: 'propose_invoice_edit', description: 'Propose changing one invoice in the Invoicing tab itself (so the invoice and every number match). Only the fields given change. Can also record or undo a payment, regroup it into another invoice\'s job or its own job, or delete it. One invoice per call; call it several times for several invoices.', input_schema: { type: 'object', properties: {
+    invoice_no: str('The invoice to change'), match_date: str('YYYY-MM-DD, only if two invoices share the number'), reason: str('Why (what Loshem said)'),
+    status: { type: 'string', enum: ['paid', 'unpaid'] },
+    payment: { type: 'object', properties: { date: str('YYYY-MM-DD received'), amount: num('Amount received'), method: { type: 'string', enum: ['check', 'ach', 'zelle', 'cash', 'card', 'other'] }, check_no: str('Check #') } },
+    new_invoice_no: str('Renumber'), invoice_date: str('YYYY-MM-DD'), terms: str('Terms'), client_name: str('Client'), client_address_1: str('Billing street'), client_address_2: str('Billing city, state ZIP'),
+    project: str('Project'), site_line_1: str('Job site, e.g. "Lot 261"'), site_line_2: str('Job site line 2'),
+    contract_amount: num('Contract (proposal) total'), schedule_mode: { type: 'string', enum: ['pct', 'amt'], description: 'Draw values in % of contract or $' },
+    draws: { type: 'array', description: 'Replaces the whole draw schedule', items: { type: 'object', properties: { label: str('Draw description'), value: num('% or $') }, required: ['label', 'value'] } },
+    this_draw: { type: 'integer', description: 'Which draw (1-based) this invoice bills' },
+    extra_items: { type: 'array', description: 'Replaces the extra/change-order items', items: { type: 'object', properties: { description: str('Item'), amount: num('$') }, required: ['description', 'amount'] } },
+    tax_rate_pct: num('Sales tax %'),
+    same_job_as: str('Put this invoice in the same job as that invoice number'), own_job: { type: 'boolean', description: 'Make this invoice its own job' },
+    delete: { type: 'boolean', description: 'Delete the invoice from the Invoicing tab' } }, required: ['invoice_no', 'reason'] } },
+  { name: 'propose_data_fix', description: 'Propose one batch of clean-ups to Cockpit records. ops: delete_entry {id}; update_entry {id, fields{date, amount, category, party, job_name, method, check_no, memo, invoice_no}}; delete_job {job_name}; merge_job {job_name, into_job_name}; rename_job {job_name, new_name}; set_job_status {job_name, status}; delete_outside_invoice {invoice_no}; update_time_entry {id, date, hours, job_name}; delete_time_entry {id}; resolve_flag {id}. Ledger rows that come from invoices can\'t be changed here – edit the invoice.', input_schema: { type: 'object', properties: {
+    ops: { type: 'array', items: { type: 'object', properties: { op: { type: 'string', enum: ['delete_entry', 'update_entry', 'delete_job', 'merge_job', 'rename_job', 'set_job_status', 'delete_outside_invoice', 'update_time_entry', 'delete_time_entry', 'resolve_flag'] },
+      id: { type: 'integer' }, fields: { type: 'object', additionalProperties: true }, job_name: str('Job'), into_job_name: str('Job to merge into'), new_name: str('New name'),
+      status: str('Job status'), invoice_no: str('Invoice #'), date: str('YYYY-MM-DD'), hours: num('Hours') }, required: ['op'] } },
+    reason: str('Why (what Loshem said)') }, required: ['ops', 'reason'] } },
+];
+const FLAG_TOOL = { name: 'flag_for_clara', description: 'Send a books problem to Clara (the Bookkeeper), who is the only one who can fix data, invoices or rules. Use it instead of trying to fix the books yourself. Saved right away (no approval needed).', input_schema: { type: 'object', properties: { issue: str('What looks wrong, with invoice numbers, amounts and dates') }, required: ['issue'] } };
+const PREVIEW = { propose_rule_change: FIX.previewRuleChange, propose_invoice_edit: FIX.previewInvoiceEdit, propose_data_fix: FIX.previewDataFix };
 
 const money = (n) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 function summarize(action, p) {
@@ -213,6 +257,9 @@ async function execute(action, p) {
     }
     case 'remember_fact': { const { rows } = await q('INSERT INTO facts (text, agent) VALUES ($1,$2) RETURNING *', [p.text, p._agent || null]); return rows[0]; }
     case 'forget_fact': await q('DELETE FROM facts WHERE id=$1', [p.id]); return { forgot: p.id };
+    case 'propose_rule_change': return RULES.setRules(p);
+    case 'propose_invoice_edit': return FIX.runInvoiceEdit(p);
+    case 'propose_data_fix': return FIX.runDataFix(p);
     default: throw new Error(`Unknown action ${action}`);
   }
 }
@@ -276,6 +323,14 @@ async function runRead(name, input, agentId) {
     case 'get_time_entries': return S.listTimeEntries({ ...input, job_id: input.job_name ? await resolveJob(input.job_name) : null });
     case 'get_bank_rows': { const { rows } = await q('SELECT id, date, description, amount, status, tx_id FROM bank_rows WHERE ($1::text IS NULL OR status=$1) ORDER BY date DESC LIMIT 200', [input.status || null]); return rows; }
     case 'search_documents': return F.searchDocs(await F.docTexts([agentId, 'shared']), input.query);
+    case 'get_books_rules': { const r = await RULES.getRules(); return { rules: RULES.describe(r), house_rules: r.house_rules.map((t, i) => `${i + 1}. ${t}`) }; }
+    case 'get_numbers_check': {
+      const c = await require('./check').numbersCheck();
+      return { comparisons: c.comparisons.map((x) => ({ name: x.name, agrees: x.ok, values: x.values })), problems: c.issues.map(({ severity, title, detail, tx_id, job_id, invoice_id }) => ({ severity, title, detail, ledger_entry_id: tx_id, job_id, invoice_id })),
+        jobs: c.projects.map((p) => ({ name: p.name, status: p.status, contract: p.contract, collected: p.collected, owed: p.owed, to_bill: p.to_bill, problems: p.issues,
+          draws: p.draws.map((d) => ({ n: d.n, label: d.label, status: d.status, invoice_no: d.invoice_no, amount: d.billed_amount ?? d.amount, paid_date: d.paid_date, check_no: d.check_no, received: d.received })) })) };
+    }
+    case 'get_invoice_record': return FIX.invoiceRecord(input.invoice_no, input.match_date);
     default: throw new Error(`Unknown tool ${name}`);
   }
 }
@@ -297,13 +352,14 @@ async function staticPrompt(cfg, agentId) {
   return `You are ${cfg.name}, the ${cfg.title} on LuxCraft Renovations' team. You live on the ${cfg.page} tab of the LuxCraft Cockpit.
 
 THE BUSINESS
-LuxCraft Renovations is Loshem's handyman and remodeling business serving Dayton and the Miami Valley, Ohio. Loshem lives in Fairborn (Greene County). It is a sole proprietorship / single-member LLC filing Schedule C. Jobs are mostly fixed bid with a deposit (counted as income, the first draw) and progress draws. He pays helpers and subs on 1099 (no W-2 payroll), frequently buys materials clients reimburse at cost or with a markup, and plans his helpers' days as well as his own. He writes invoices and estimates in the invoice & estimate app on the Cockpit's Invoicing tab; they save straight into the Cockpit, so get_invoice, get_job_detail, get_estimates and get_jobs show exactly what is written on them (scope, draw descriptions, change-order items, terms, notes) – read them instead of asking him to repeat anything. Projects come ONLY from invoices: every invoice starts its own project (even when another project has the same lot number), and an invoice made with "Bill next draw" continues the project of the invoice it came from. Each project is one contract billed as progress draws. Never propose creating a job for invoiced work, and never quote a contract, owed or still-to-bill figure from an estimate or a job that isn't from an invoice. A draw is paid ONLY when the data says paid (he records the payment on its invoice in the Invoicing tab, with the date received and check #, or types the draw's check # on a later invoice). Payments are never entered in the ledger by hand. Never call an invoice paid because a later invoice prints it under "Paid to date"; if the two disagree, say so and suggest he mark it. Invoice amounts, dates and paid marks are changed in the invoice app, not by proposals.
+LuxCraft Renovations is Loshem's handyman and remodeling business serving Dayton and the Miami Valley, Ohio. Loshem lives in Fairborn (Greene County). It is a sole proprietorship / single-member LLC filing Schedule C. Jobs are mostly fixed bid with a deposit (counted as income, the first draw) and progress draws. He pays helpers and subs on 1099 (no W-2 payroll), frequently buys materials clients reimburse at cost or with a markup, and plans his helpers' days as well as his own. He writes invoices and estimates in the invoice & estimate app on the Cockpit's Invoicing tab; they save straight into the Cockpit, so get_invoice, get_job_detail, get_estimates and get_jobs show exactly what is written on them (scope, draw descriptions, change-order items, terms, notes) – read them instead of asking him to repeat anything. Projects come ONLY from invoices: every invoice starts its own project (even when another project has the same lot number), and an invoice made with "Bill next draw" continues the project of the invoice it came from. Each project is one contract billed as progress draws. Never propose creating a job for invoiced work, and never quote a contract, owed or still-to-bill figure from an estimate or a job that isn't from an invoice. A draw is paid ONLY when the data says paid (he records the payment on its invoice in the Invoicing tab, with the date received and check #, or types the draw's check # on a later invoice). Payments are never entered in the ledger by hand. Never call an invoice paid because a later invoice prints it under "Paid to date"; if the two disagree, say so and suggest he mark it. How invoices turn into jobs and numbers is set by the BOOKS RULES (listed live below, set by Loshem); follow them exactly, and follow the HOUSE RULES too. Only Clara, the Bookkeeper, changes the books (corrects, deletes or conforms data, edits invoices, changes rules) – always through approval cards; every other agent sends books problems to her with flag_for_clara.
 The team: ${team}.
 
 YOUR SPECIALTY
 ${cfg.specialty}
 
 HOW YOU WORK
+- When something about an invoice or a number is ambiguous (which job an invoice belongs to, whether money was received, what a draw means), ask Loshem one short, specific question before acting. Don't guess.
 - You never change data directly. Every change goes through a propose_* tool, which puts an approval card in front of Loshem; it only happens when he taps Approve. Say briefly what you proposed ("I've put that up for approval"). Never claim something is saved or done before it's approved. Group related changes in one reply.
 - Use the read tools for real numbers. Never invent amounts, dates or clients. If something is missing, ask.
 - Use web search for anything current (tax rules and limits, rates, prices, code requirements). Mention where the information came from.
@@ -322,9 +378,14 @@ async function dynamicPrompt() {
     const draws = d.length ? ` · draws: ${d.map((x) => `#${x.n} ${x.status}${x.invoice_no ? ` ${x.invoice_no}` : ''}`).join(', ')}` : '';
     return `${j.name}${j.client ? ` (${j.client})` : ''} [${j.status}]${j.contract_total ? ` contract $${j.contract_total}, collected $${j.income}, owed $${j.owed}, to bill $${j.to_bill}` : ''}${draws}`;
   };
+  const rules = await RULES.getRules();
+  const flags = await q('SELECT id, agent, text FROM books_flags WHERE resolved_at IS NULL ORDER BY id DESC LIMIT 15');
   const cats = await q(`SELECT name, kind FROM categories WHERE active ORDER BY kind, sort`);
   const workers = await q(`SELECT name, role FROM workers WHERE active ORDER BY id`);
   return `Today is ${dow}, ${today} (America/New_York).
+BOOKS RULES in effect (every tab follows these):\n${RULES.describe(rules).map((r) => `- ${r.label}: ${r.text}`).join('\n')}
+HOUSE RULES (Loshem's conventions – follow them): ${rules.house_rules.length ? rules.house_rules.map((t, i) => `${i + 1}. ${t}`).join(' ') : 'none yet'}
+Open books flags for Clara: ${flags.rows.length ? flags.rows.map((f) => `#${f.id} (from ${f.agent}) ${f.text}`).join(' | ') : 'none'}.
 Shared team memory (facts Loshem approved): ${facts.rows.length ? facts.rows.map((f) => `#${f.id} ${f.text}`).join(' | ') : 'none yet'}.
 Open projects (live):\n${jobs.map(projectLine).join('\n') || 'none'}
 Crew: ${workers.rows.map((w) => `${w.name}${w.role === 'owner' ? ' (Loshem)' : ''}`).join(', ')}.
@@ -355,8 +416,10 @@ async function respond(agentId, userText, { kind = 'chat', instruction = null } 
     { type: 'text', text: await staticPrompt(cfg, agentId), cache_control: { type: 'ephemeral' } },
     { type: 'text', text: await dynamicPrompt() },
   ];
+  const keeper = agentId === BOOKS_KEEPER;
   const tools = [
-    ...READ_TOOLS, ...PROPOSE_TOOLS,
+    ...READ_TOOLS, ...PROPOSE_TOOLS.filter((t) => keeper || !KEEPER_ONLY.has(t.name)),
+    ...(keeper ? BOOKS_TOOLS : [FLAG_TOOL]),
     { type: 'web_search_20260318', name: 'web_search', max_uses: 5, allowed_callers: ['direct'],
       user_location: { type: 'approximate', city: settings.business_city || 'Fairborn', region: 'Ohio', country: 'US', timezone: 'America/New_York' } },
   ];
@@ -370,10 +433,17 @@ async function respond(agentId, userText, { kind = 'chat', instruction = null } 
     for (const b of content.filter((x) => x.type === 'tool_use')) {
       try {
         let out;
-        if (b.name.startsWith('propose_') || b.name === 'remember_fact' || b.name === 'forget_fact') {
+        if (b.name === 'flag_for_clara') {
+          const { rows } = await q('INSERT INTO books_flags (agent, text) VALUES ($1,$2) RETURNING id', [agentId, String((b.input || {}).issue || '').slice(0, 1000)]);
+          out = { flag_id: rows[0].id, note: 'Sent to Clara. Tell Loshem she has it.' };
+        } else if (b.name.startsWith('propose_') || b.name === 'remember_fact' || b.name === 'forget_fact') {
+          if (KEEPER_ONLY.has(b.name) && !keeper) throw new Error('Only Clara (Bookkeeper) can change the books. Use flag_for_clara.');
           const payload = b.input || {};
+          // Books changes get a before → after preview from the live data; an invalid one comes back to the agent
+          // as an error to fix, instead of becoming a card Loshem can't approve.
+          const summary = PREVIEW[b.name] ? await PREVIEW[b.name](payload) : summarize(b.name, payload);
           const { rows } = await q('INSERT INTO proposals (agent, action, payload, summary) VALUES ($1,$2,$3,$4) RETURNING id',
-            [agentId, b.name, JSON.stringify(payload), summarize(b.name, payload).slice(0, 600)]);
+            [agentId, b.name, JSON.stringify(payload), summary.slice(0, 2000)]);
           proposalIds.push(rows[0].id);
           out = { proposal_id: rows[0].id, status: 'pending_approval', note: 'Shown to Loshem as an approval card. Not saved yet.' };
         } else {

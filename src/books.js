@@ -90,6 +90,30 @@ async function save(key, value, baseVersion, changes = null) {
   return { version, merged, value: merged ? finalValue : undefined, summary };
 }
 
+// A change made from the Cockpit side (an approved fix by Clara): edit the saved invoice data directly, in one
+// locked step, then rebuild every number. The Invoicing tab shows it the next time it loads.
+async function edit(key, mutate) {
+  if (!isKey(key)) throw Object.assign(new Error('Unknown key'), { status: 404 });
+  const listKey = KEYS[key];
+  const client = await pool.connect();
+  let result; let version;
+  try {
+    await client.query('BEGIN');
+    const cur = (await client.query('SELECT value, version FROM books WHERE key=$1 FOR UPDATE', [key])).rows[0];
+    const before = cur ? cur.value : { [listKey]: [] };
+    const value = JSON.parse(JSON.stringify(before));
+    if (!Array.isArray(value[listKey])) value[listKey] = [];
+    result = await mutate(value);
+    if (listKey === 'invoices') await notePaidMarks(client, before, value);
+    version = (cur ? cur.version : 0) + 1;
+    await client.query(`INSERT INTO books (key, value, version, updated_at) VALUES ($1,$2,$3,now())
+      ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, version=EXCLUDED.version, updated_at=now()`, [key, JSON.stringify(value), version]);
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
+  const summary = await refresh();
+  return { ...(result || {}), version, refreshed: !(summary && summary.error) };
+}
+
 // A backup file exported from the invoice app (or the old standalone app): merged into the built-in app's data.
 async function importBackup(data) {
   const all = await loadAll();
@@ -108,4 +132,4 @@ async function importBackup(data) {
   return { ...r, added };
 }
 
-module.exports = { loadAll, save, refresh, importBackup, isKey, KEYS };
+module.exports = { loadAll, save, refresh, importBackup, edit, isKey, KEYS };

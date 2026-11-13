@@ -46,7 +46,12 @@ async function normalizeTx(t) {
 // Invoice payments live on the invoice (Invoicing tab), so a hand-entered payment for one of its invoices would be a
 // second copy of the same money.
 async function guardInvoicePayment(n, createdBy) {
-  if (createdBy === 'sync' || n.kind !== 'income' || n.category === AWAITING || !n.invoice_no) return;
+  if (createdBy === 'sync' || n.kind !== 'income' || n.category === AWAITING) return;
+  // Rule "Income entered by hand": never → all income comes from invoices (owner contributions aren't income).
+  if (n.category !== 'Owner Contribution' && (await require('./rules').getRules()).manual_income === 'never') {
+    throw Object.assign(new Error('Income is entered only through invoices (Settings → Books rules). Record the payment on its invoice in the Invoicing tab.'), { status: 400 });
+  }
+  if (!n.invoice_no) return;
   const inv = (await q(`SELECT invoice_no FROM invoices WHERE lower(invoice_no)=lower($1) AND source='invoice-app' AND NOT void`, [n.invoice_no])).rows[0];
   if (inv) throw Object.assign(new Error(`${inv.invoice_no} is in the Invoicing tab – record its payment there (click its Unpaid button) so it's only counted once.`), { status: 400 });
 }
@@ -155,6 +160,7 @@ async function listEstimates() {
 // ---------- jobs ----------
 async function listJobs() {
   const settings = await getSettings();
+  const rules = await require('./rules').getRules();
   const { rows } = await q(`
     SELECT j.*,
       COALESCE((SELECT SUM(amount) FROM transactions t WHERE t.job_id=j.id AND t.kind='income' AND t.category NOT IN ${NOT_REVENUE}),0) AS income,
@@ -178,10 +184,11 @@ async function listJobs() {
     const draws = Array.isArray(j.draws) ? j.draws : null;
     const contractTotal = round2((j.contract_amount || 0) + (j.change_orders || 0));
     // Still to bill comes only from an invoice's draw schedule – never guessed from a contract amount.
-    const toBill = draws ? round2(draws.filter((d) => d.status === 'scheduled').reduce((a, d) => a + d.amount, 0)) : 0;
+    // Rule "Draws not invoiced yet": hidden → numbers only change when an invoice is created.
+    const toBill = draws && rules.count_to_bill === 'show' ? round2(draws.filter((d) => d.status === 'scheduled').reduce((a, d) => a + d.amount, 0)) : 0;
     const collected = draws ? round2(draws.filter((d) => d.status === 'paid').reduce((a, d) => a + (d.received ?? d.billed_amount ?? d.amount), 0)) : 0;
     return { ...j, from_invoices: !!draws, collected, unbilled: round2(j.unbilled), owed: round2(j.owed), contract_total: draws ? contractTotal : 0, to_bill: toBill,
-      draws_paid: draws ? draws.filter((d) => d.status === 'paid').length : null, draws_total: draws ? draws.length : null,
+      draws_paid: draws ? draws.filter((d) => d.status === 'paid' && !d.extra).length : null, draws_total: draws ? draws.filter((d) => !d.extra).length : null,
       draw_flags: draws ? draws.filter((d) => d.flag).map((d) => `Draw ${d.n}: ${d.flag}`) : [],
       vehicle_cost: vehicle, total_cost: cost, profit,
       margin: j.income > 0 ? profit / j.income : null, per_hour: j.my_hours > 0 ? round2(profit / j.my_hours) : null };
@@ -189,6 +196,10 @@ async function listJobs() {
 }
 async function upsertJob(b) {
   const fields = ['client', 'address', 'status', 'pricing', 'contract_amount', 'budget_cost', 'start_date', 'end_date', 'source', 'notes'];
+  // Rule "What counts as a job": with invoices only, new jobs come from the Invoicing tab, never from here.
+  if (!b.id && (await require('./rules').getRules()).jobs_source === 'invoices_only' && !(await resolveJob(b.name))) {
+    throw Object.assign(new Error('Jobs come only from invoices (Settings → Books rules). Create the invoice in the Invoicing tab and its job appears.'), { status: 400 });
+  }
   const id = b.id ? Number(b.id) : await resolveJob(b.name, { create: true, client: b.client });
   const sets = []; const vals = [id];
   if (b.name && b.id) { vals.push(b.name.trim()); sets.push(`name=$${vals.length}`); }
@@ -511,7 +522,7 @@ async function overview() {
       overdue: invoices.filter((i) => i.status === 'overdue').length, items: invoices.slice(0, 6) },
     unbilled: round2(unbilled.rows[0].v),
     backlog: await (async () => { const js = (await listJobs()).filter((j) => j.status === 'active' && j.from_invoices);
-      return { to_bill: round2(js.reduce((a, j) => a + j.to_bill, 0)), jobs: js.filter((j) => j.to_bill > 0).length,
+      return { shown: (await require('./rules').getRules()).count_to_bill === 'show', to_bill: round2(js.reduce((a, j) => a + j.to_bill, 0)), jobs: js.filter((j) => j.to_bill > 0).length,
         flags: js.flatMap((j) => j.draw_flags.map((f) => `${j.name} · ${f}`)) }; })(),
     tax: { net_profit: tax.net_profit, estimate: tax.estimate.total, paid: tax.estimate.paid, remaining: tax.estimate.remaining,
       pct: tax.estimate.effective_set_aside_pct, next_deadline: tax.next_deadline },

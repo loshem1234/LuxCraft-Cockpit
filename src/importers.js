@@ -4,6 +4,7 @@ const { q, resolveJob, getSettings } = require('./db');
 const S = require('./services');
 // The same project/payment rules the invoice app uses, so the two always agree.
 const LCP = require('../public/invoice-app/projects.js');
+const RULES = require('./rules');
 
 const num = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -52,10 +53,20 @@ async function projectJob(pid, recs, stats) {
   const key = `project:${pid}`;
   const client = clean(st.client?.name) || null; const lot = lotOf(st); const site = siteOf(st);
   let found = (await q('SELECT id FROM jobs WHERE ext_key=$1', [key])).rows[0];
+  // Jobs these invoices belonged to before (e.g. before the grouping rule changed), oldest invoice first.
+  const before = (await q(`SELECT DISTINCT ON (job_id) job_id, issue_date FROM invoices WHERE external_id = ANY($1) AND job_id IS NOT NULL ORDER BY job_id, issue_date`,
+    [recs.map((r) => `invoice-app:inv:${r.id}`)])).rows.sort((a, b) => String(a.issue_date).localeCompare(String(b.issue_date))).map((r) => r.job_id);
+  if (!found) {
+    const prior = before.find((id) => !stats.claimed.has(id));
+    if (prior) { await q('UPDATE jobs SET ext_key=$2 WHERE id=$1', [prior, key]); found = { id: prior }; }
+  }
   if (!found) {
     const legacy = (await q('SELECT id FROM jobs WHERE ext_key=$1', [jobKeyFor(st)])).rows[0];
     if (legacy && !stats.claimed.has(legacy.id)) { await q('UPDATE jobs SET ext_key=$2 WHERE id=$1', [legacy.id, key]); found = legacy; }
   }
+  // Other jobs these invoices used to be in: their expenses, hours and miles move into this one (below, once
+  // nothing feeds them any more).
+  if (found) for (const id of before) if (id !== found.id) stats.mergeInto[id] = found.id;
   if (found) {
     stats.claimed.add(found.id);
     await q(`UPDATE jobs SET client=COALESCE($2, client), lot=$3, address=COALESCE($4, address), pricing='fixed', source='invoice-app',
@@ -230,7 +241,8 @@ function contractSchedule(recs, stats) {
     const ld = later ? (later.st.draws || [])[i] || {} : {};
     const markedPaid = biller && biller.status === 'paid';
     const pay = (markedPaid && biller.payment) || {};
-    const laterCk = String(ld.ck || '').trim() || null;
+    // Rule: does a check # typed on a later invoice mark this draw paid?
+    const laterCk = stats.rules.later_check_marks_paid === 'yes' ? (String(ld.ck || '').trim() || null) : null;
     const checkNo = String(pay.ck || '').trim() || laterCk;
     const paid = !!(markedPaid || laterCk);
     let date = null; let note = '';
@@ -242,32 +254,61 @@ function contractSchedule(recs, stats) {
       date = typed || (markedPaid ? (stats.marks[biller.id] || toDate(biller.updatedAt)) : null) || (billed && billed.issue_date);
       note = typed ? '' : markedPaid ? ' · no payment date entered (dated the day it was marked Paid)' : ' · no paid date entered';
     }
-    const received = paid && num(pay.amount) > 0 ? r2(num(pay.amount)) : null;
+    // Rule: a short payment either leaves the rest owed or counts as paid in full.
+    const received = paid && num(pay.amount) > 0 && stats.rules.short_payment === 'rest_owed' ? r2(num(pay.amount)) : null;
     return {
       n: i + 1, label: d.label || `Draw ${i + 1}`, pct: st.mode === 'pct' ? num(d.val) : (num(st.proposal) ? r2(amounts[i] / num(st.proposal) * 100) : null),
       amount: amounts[i] || 0, status: paid ? 'paid' : billed ? 'billed' : 'scheduled',
       invoice_no: billed ? billed.invoice_no : null, billed_amount: billed ? billed.amount : null, items: billed ? billed.items : 0, tax: billed ? billed.tax : 0,
       issue_date: billed ? billed.issue_date : null, due_date: billed ? billed.due_date : null,
       paid_date: paid ? date : null, check_no: checkNo, note, received, method: pay.method || (checkNo ? 'check' : null),
-      flag: !paid && later ? `${(stats.stored[later.id] || {}).invoice_no || 'A later invoice'} prints this draw under "Paid to date", but it isn't marked paid` : null,
+      flag: !paid && later && stats.rules.later_check_marks_paid === 'yes' ? `${(stats.stored[later.id] || {}).invoice_no || 'A later invoice'} prints this draw under "Paid to date", but it isn't marked paid` : null,
       biller_id: biller ? biller.id : null,
     };
   });
+  // Invoices in this job that aren't the bill for a draw of the schedule above (e.g. two separate contracts on one
+  // lot when jobs are grouped by lot): each still counts, as its own line, by its own paid status.
+  const used = new Set(schedule.map((d) => d.biller_id).filter(Boolean));
+  for (const r of recs) {
+    if (used.has(r.id) || !stats.stored[r.id]) continue;
+    const b = stats.stored[r.id]; const i = drawIndex(r.st); const pd = r.status === 'paid' ? (r.payment || {}) : null;
+    schedule.push({ n: i + 1, extra: true, label: `${((r.st.draws || [])[i] || {}).label || `Draw ${i + 1}`} (${b.invoice_no})`, pct: null, amount: b.amount,
+      status: pd ? 'paid' : 'billed', invoice_no: b.invoice_no, billed_amount: b.amount, items: b.items, tax: b.tax, issue_date: b.issue_date, due_date: b.due_date,
+      paid_date: pd ? (toDate(pd.date) || stats.marks[r.id] || toDate(r.updatedAt) || b.issue_date) : null, check_no: pd ? (String(pd.ck || '').trim() || null) : null,
+      note: pd && !toDate(pd.date) ? ' · no payment date entered (dated the day it was marked Paid)' : '',
+      received: pd && num(pd.amount) > 0 && stats.rules.short_payment === 'rest_owed' ? r2(num(pd.amount)) : null, method: pd ? (pd.method || null) : null, flag: null, biller_id: r.id });
+  }
   return { present, schedule, contract: num(st.proposal), job_id: (stats.stored[present.id] || {}).job_id ?? null, client: (stats.stored[present.id] || {}).client || null };
 }
 
 async function mirrorContracts(valid, source, stats) {
   const keep = new Set(); const jobs = new Set();
-  for (const recs of LCP.groups(valid).values()) {
-    const c = contractSchedule(recs, stats);
+  for (const recs of LCP.groups(valid, { mode: stats.rules.project_grouping }).values()) {
+    // A job can hold more than one contract (jobs grouped by lot): each contract keeps its own draw schedule.
+    const chains = stats.rules.project_grouping === 'invoice_chain' ? [recs] : [...LCP.groups(recs).values()];
+    const parts = chains.map((ch) => {
+      const first = ch.slice().sort((x, y) => String(x.createdAt || '').localeCompare(String(y.createdAt || '')))[0];
+      const part = contractSchedule(ch, stats);
+      const of = part.schedule.filter((d) => !d.extra).length;
+      part.schedule = part.schedule.map((d) => ({ ...d, of, label: chains.length > 1 && !d.extra ? `${d.label} · contract ${first.st.invNo}` : d.label }));
+      return part;
+    });
+    const c = { ...parts[0], schedule: parts.flatMap((x) => x.schedule), contract: r2(parts.reduce((a2, x) => a2 + x.contract, 0)),
+      job_id: parts.map((x) => x.job_id).find((x) => x != null) ?? null };
     jobs.add(c.job_id ?? 'none');
     if (c.job_id) {
       const co = r2(c.schedule.reduce((s2, d) => s2 + (d.items || 0), 0));
       // Every draw paid → the project is complete; a draw owed again (marked unpaid) → active again.
-      const done = c.schedule.length > 0 && c.schedule.every((d) => d.status === 'paid' && !(d.received != null && d.received < (d.billed_amount ?? d.amount) - 0.004));
+      // Rule "When a job moves to Completed".
+      const fullyPaid = (d) => d.status === 'paid' && !(d.received != null && d.received < (d.billed_amount ?? d.amount) - 0.004);
+      const closeRule = stats.rules.job_closes_when;
+      const billedDraws = c.schedule.filter((d) => d.status !== 'scheduled');
+      const done = closeRule === 'manual' ? null
+        : closeRule === 'billed_paid' ? billedDraws.length > 0 && billedDraws.every(fullyPaid)
+          : c.schedule.length > 0 && c.schedule.every(fullyPaid);
       await q(`UPDATE jobs SET contract_amount=$2, change_orders=$3, draws=$4, draws_synced_at=now(),
-          status=CASE WHEN $5 AND status='active' THEN 'complete' WHEN NOT $5 AND status='complete' THEN 'active' ELSE status END WHERE id=$1`,
-        [c.job_id, c.contract || null, co || null, JSON.stringify(c.schedule.map(({ biller_id, ...d }) => d)), done]);
+          status=CASE WHEN $5::boolean IS NULL THEN status WHEN $5 AND status='active' THEN 'complete' WHEN NOT $5 AND status='complete' THEN 'active' ELSE status END WHERE id=$1`,
+        [c.job_id, c.contract || null, co || null, JSON.stringify(c.schedule.map(({ biller_id, of, ...d }) => d)), done]);
     }
     for (const d of c.schedule) {
       if (d.status === 'scheduled') continue;
@@ -281,7 +322,8 @@ async function mirrorContracts(valid, source, stats) {
           [d.invoice_no, S.AWAITING])).rows.length;
         if (manual) { stats.manual_payments.push(d.invoice_no); continue; }
       }
-      const label = `${d.label} (draw ${d.n} of ${c.schedule.length})`;
+      const nDraws = c.schedule.filter((x) => !x.extra).length;
+      const label = d.extra ? d.label : `${d.label} (draw ${d.n} of ${d.of || nDraws})`;
       const paid = d.status === 'paid';
       const rows = [];
       if (paid) {
@@ -329,7 +371,7 @@ async function mirrorContracts(valid, source, stats) {
 
 async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'invoice-app', { full = false } = {}) {
   const stats = { full, est_ids: [], jobs_removed: 0, invoices: 0, estimates: 0, payments_added: 0, invoices_added: 0, ledger_updated: 0, ledger_removed: 0,
-    jobs_touched: new Set(), claimed: new Set(), lotJobs: {}, renamed: [], skipped: [], flags: [], manual_payments: [], stored: {}, settings: await getSettings() };
+    jobs_touched: new Set(), claimed: new Set(), mergeInto: {}, lotJobs: {}, renamed: [], skipped: [], flags: [], manual_payments: [], stored: {}, settings: await getSettings(), rules: await RULES.getRules() };
   stats.marks = Object.fromEntries((await q('SELECT record_id, paid_on FROM paid_marks')).rows.map((r) => [r.record_id, r.paid_on]));
   // One bad record never stops the rest of the sync.
   const safely = async (label, fn) => {
@@ -338,7 +380,7 @@ async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'inv
   const valid = invoices.filter((r) => r && r.id && r.st && String(r.st.invNo || '').trim() && Array.isArray(r.st.draws) && r.st.draws.length);
   // Projects come only from invoices: one per invoice project. Oldest first, so the first project on a lot keeps
   // the project an older sync made for that lot.
-  const projects = [...LCP.groups(valid).entries()].sort(([, a], [, b]) =>
+  const projects = [...LCP.groups(valid, { mode: stats.rules.project_grouping }).entries()].sort(([, a], [, b]) =>
     String(a.map((r) => r.createdAt || '').sort()[0] || '').localeCompare(String(b.map((r) => r.createdAt || '').sort()[0] || '')));
   for (const [pid, recs] of projects) {
     let jobId = null;
@@ -373,6 +415,14 @@ async function importInvoiceApp({ invoices = [], estimates = [] }, source = 'inv
       FROM jobs j WHERE (j.source IN ('invoice-app','estimate') OR j.draws_synced_at IS NOT NULL OR j.ext_key IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.job_id=j.id AND NOT i.void)`);
     for (const j of rows) {
+      const target = stats.mergeInto[j.id];
+      if (target && target !== j.id) {
+        // Its invoices now belong to another job: bring its own entries along and remove it.
+        for (const t of ['transactions', 'time_entries', 'mileage']) await q(`UPDATE ${t} SET job_id=$2 WHERE job_id=$1 ${t === 'transactions' ? "AND created_by<>'sync'" : ''}`, [j.id, target]);
+        await q(`DELETE FROM transactions WHERE job_id=$1 AND created_by='sync'`, [j.id]);
+        await q('UPDATE invoices SET job_id=NULL WHERE job_id=$1', [j.id]); await q('UPDATE estimates SET job_id=NULL WHERE job_id=$1', [j.id]);
+        await q('DELETE FROM jobs WHERE id=$1', [j.id]); stats.jobs_removed++; stats.jobs_merged = (stats.jobs_merged || 0) + 1; continue;
+      }
       if (!j.has_tx && !j.has_work) {
         await q('UPDATE invoices SET job_id=NULL WHERE job_id=$1', [j.id]); await q('UPDATE estimates SET job_id=NULL WHERE job_id=$1', [j.id]);
         await q(`DELETE FROM transactions WHERE job_id=$1 AND created_by='sync'`, [j.id]);

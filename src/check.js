@@ -61,7 +61,7 @@ async function numbersCheck() {
   const projects = projectsFromInvoices.map((j) => {
     const ds = j.draws || [];
     const billed = ds.filter((d) => d.status !== 'scheduled').reduce((a, d) => a + (d.billed_amount ?? d.amount), 0);
-    const scheduleSum = r2(ds.reduce((a, d) => a + d.amount, 0));
+    const scheduleSum = r2(ds.filter((d) => !d.extra).reduce((a, d) => a + d.amount, 0));
     const issues = [];
     if (!same(scheduleSum, j.contract_amount || 0)) issues.push(`Draw schedule adds up to ${scheduleSum.toFixed(2)}, contract is ${(j.contract_amount || 0).toFixed(2)}`);
     for (const d of ds) {

@@ -206,6 +206,8 @@ CREATE TABLE IF NOT EXISTS books (
 );
 -- The day each invoice was marked Paid in the app (the app itself doesn't record it).
 CREATE TABLE IF NOT EXISTS paid_marks (record_id TEXT PRIMARY KEY, paid_on DATE NOT NULL);
+-- Problems the other agents spot in the books, for Clara (the only one who fixes the books) to resolve.
+CREATE TABLE IF NOT EXISTS books_flags (id SERIAL PRIMARY KEY, agent TEXT, text TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), resolved_at TIMESTAMPTZ);
 -- One project per lot: the importer finds its jobs by this key (client + lot, or client + site address).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS ext_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_ext_key_idx ON jobs(ext_key) WHERE ext_key IS NOT NULL;
