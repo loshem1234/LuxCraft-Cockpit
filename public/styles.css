@@ -389,3 +389,26 @@ body[data-tab="invoicing"] .fab, body[data-tab="invoicing"] .fab-menu { display:
   .ts-row.ts-th { display: none; }
   .ts-row .ts-acts .btn { padding: 4px 8px; }
 }
+
+/* Books changes on approval cards: one line per change */
+.prop.books .prop-lines { margin: 6px 0 4px; padding-left: 18px; }
+.prop.books .prop-lines li { margin: 2px 0; }
+.prop.books { border-left: 3px solid var(--gold); }
+
+/* Settings → Books rules */
+.rules-list .rule { padding: 10px 0; border-top: 1px solid var(--line); }
+.rules-list .rule:first-child { border-top: 0; padding-top: 0; }
+.rules-list label { display: flex; flex-direction: column; gap: 6px; text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--text); }
+.rules-list .rule-l { font-weight: 600; }
+.rule-opts { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.rules-list .rule-opt { flex-direction: row; align-items: flex-start; gap: 8px; font-size: 13.5px; color: var(--text-2); cursor: pointer; padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; }
+.rules-list .rule-opt:has(input:checked) { border-color: color-mix(in srgb, var(--gold) 55%, var(--line)); background: var(--gold-soft); color: var(--text); }
+.rules-list .rule-opt input { width: auto; margin-top: 3px; flex-shrink: 0; accent-color: var(--gold); }
+ol.house { margin: 0; padding-left: 20px; }
+ol.house li { padding: 6px 0; border-top: 1px solid var(--line); }
+ol.house li:first-child { border-top: 0; }
+ol.house li span { display: inline; }
+ol.house li button { float: right; margin-left: 8px; }
+.rules-sum summary { cursor: pointer; }
+.rules-sum .prop-lines { margin: 10px 0 6px; padding-left: 18px; font-size: 14px; }
+.rules-sum .prop-lines li { margin: 4px 0; color: var(--text-2); }
