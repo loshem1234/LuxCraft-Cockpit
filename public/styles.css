@@ -343,3 +343,49 @@ body[data-tab="invoicing"] .fab, body[data-tab="invoicing"] .fab-menu { display:
 .chk-li .chk-acts { flex-shrink: 0; flex-wrap: wrap; max-width: 100%; }
 .chk-li .chk-acts select { width: 220px; max-width: 100%; min-width: 0; }
 .chk-li, .chk-li .chk-acts { min-width: 0; }
+
+/* ---- Crew & hours: weekly timesheet ---- */
+.ts-people { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 14px; scrollbar-width: thin; }
+.ts-person { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 14px; min-width: 132px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
+.ts-person span { font-size: 12px; color: var(--muted); }
+.ts-person:hover { border-color: color-mix(in srgb, var(--gold) 50%, var(--line)); }
+.ts-person.on { border-color: var(--gold); background: var(--gold-soft); box-shadow: inset 0 0 0 1px var(--gold); }
+.ts-person.add { justify-content: center; align-items: center; color: var(--gold); border-style: dashed; min-width: 120px; }
+.ts-grid { grid-template-columns: minmax(0, 2.1fr) minmax(260px, 1fr); align-items: start; }
+.ts-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.ts-head .row { align-items: center; gap: 8px; flex-wrap: wrap; }
+.ts-week { display: flex; flex-direction: column; min-width: 150px; text-align: center; line-height: 1.25; }
+.ts-jump { width: auto; max-width: 150px; padding: 6px 8px; font-size: 13px; }
+.ts-fill { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; margin-bottom: 12px; font-size: 14px; }
+.ts-fill input, .ts-fill select { padding: 6px 8px; }
+.ts-chk { display: inline-flex; align-items: center; gap: 3px; font-size: 13px; margin: 0; text-transform: none; letter-spacing: 0; color: var(--text); }
+.ts-chk input { width: auto; margin: 0; }
+.ts-sheet { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.ts-row { display: grid; grid-template-columns: 96px minmax(0, 1.6fr) 76px 0 minmax(0, 1fr) 64px; gap: 8px; align-items: center; padding: 6px 10px; border-top: 1px solid var(--line); }
+.ts-sheet.me .ts-row { grid-template-columns: 96px minmax(0, 1.6fr) 76px 86px minmax(0, 1fr) 64px; }
+.ts-row.ts-th { border-top: 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding-top: 8px; padding-bottom: 8px; }
+.ts-row.ts-split { border-top: 1px dashed var(--line); }
+.ts-row.ts-wkend { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.ts-row.ts-today .ts-day b { color: var(--gold); }
+.ts-row.ts-has .ts-h { border-color: color-mix(in srgb, var(--gold) 55%, var(--line)); }
+.ts-row input, .ts-row select { padding: 7px 8px; min-width: 0; }
+.ts-row .ts-h, .ts-row .ts-e { text-align: right; }
+.ts-day { white-space: nowrap; }
+.ts-acts { text-align: right; }
+.ts-e-sp { display: block; }
+.ts-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.ts-weeks .ts-wk { width: 100%; display: flex; justify-content: space-between; gap: 10px; background: none; border: 0; border-top: 1px solid var(--line); color: var(--text); font: inherit; text-align: left; cursor: pointer; padding: 9px 4px; }
+.ts-weeks .ts-wk span { white-space: nowrap; }
+.ts-weeks .ts-wk:first-child { border-top: 0; }
+.ts-weeks .ts-wk:hover, .ts-weeks .ts-wk.on { color: var(--gold); }
+@media (max-width: 1100px) { .ts-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .ts-row, .ts-sheet.me .ts-row { grid-template-columns: 1fr 76px; grid-template-areas: "day acts" "job hrs" "earn note"; row-gap: 6px; }
+  .ts-row .ts-day { grid-area: day; } .ts-row .ts-job { grid-area: job; } .ts-row .ts-h { grid-area: hrs; }
+  .ts-row .ts-e, .ts-row .ts-e-sp { grid-area: earn; } .ts-row .ts-note { grid-area: note; } .ts-row .ts-acts { grid-area: acts; text-align: right; }
+  .ts-sheet:not(.me) .ts-row { grid-template-areas: "day acts" "job hrs" "note note"; }
+  .ts-sheet:not(.me) .ts-e-sp { display: none; }
+  .ts-row.ts-th { display: none; }
+  .ts-row .ts-acts .btn { padding: 4px 8px; }
+}
