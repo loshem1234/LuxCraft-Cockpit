@@ -24,7 +24,7 @@ state.pages.overview = async function renderOverview() {
       <div class="kpi"><div class="l">Expenses · this month</div><div class="v">${money0(o.month.expense)}</div><div class="s">${o.month.top_expenses[0] ? `Top: ${esc(o.month.top_expenses[0].category)}` : 'Nothing logged yet'}</div></div>
       <div class="kpi"><div class="l">Profit · this month</div><div class="v ${o.month.profit < 0 ? 'neg' : ''}">${money0(o.month.profit)}</div><div class="s">YTD ${money0(o.ytd.profit)}${o.ytd.my_hours ? ` · ${money0(o.ytd.profit / o.ytd.my_hours)}/hr` : ''}</div></div>
       <div class="kpi"><div class="l">Owed to you</div><div class="v">${money0(o.receivables.total)}</div><div class="s">${o.receivables.count} open${o.receivables.overdue ? ` · <span class="down">${o.receivables.overdue} overdue</span>` : ''}${o.unbilled ? ` · ${money0(o.unbilled)} unbilled materials` : ''}</div></div>
-      <div class="kpi"><div class="l">Still to bill</div><div class="v">${money0(o.backlog.to_bill)}</div><div class="s">scheduled draws · ${o.backlog.jobs} active job${o.backlog.jobs === 1 ? '' : 's'}</div></div>
+      ${o.backlog.shown !== false ? `<div class="kpi"><div class="l">Still to bill</div><div class="v">${money0(o.backlog.to_bill)}</div><div class="s">scheduled draws · ${o.backlog.jobs} active job${o.backlog.jobs === 1 ? '' : 's'}</div></div>` : ''}
       <div class="kpi"><div class="l">Tax set-aside left</div><div class="v">${money0(Math.max(0, o.tax.remaining))}</div><div class="s">${o.tax.next_deadline ? `${o.tax.next_deadline.q} due ${fmtDate(o.tax.next_deadline.due)}` : ''}</div></div>
       <div class="kpi"><div class="l">Last 7 days</div><div class="v">${money0(o.week.est_earned)}</div><div class="s">est. earned · goals met ${o.week.days_met}/${o.week.days_judged || 0} days</div></div>
     </div>
@@ -472,7 +472,8 @@ window.addEventListener('message', (e) => {
 state.pages['fin-check'] = async function renderCheck() {
   const el = $('#fin-check');
   el.innerHTML = '<p class="note"><span class="spinner"></span> Checking every number…</p>';
-  const c = await api('/api/check');
+  const [c, rr] = await Promise.all([api('/api/check'), api('/api/rules')]);
+  const clara = agentInfo('financials').name;
   const projects = c.projects;
   const bad = c.comparisons.filter((x) => !x.ok).length;
   const high = c.issues.filter((i) => i.severity === 'high').length;
@@ -480,12 +481,15 @@ state.pages['fin-check'] = async function renderCheck() {
     : d.status === 'billed' ? `<span class="chip open">billed ${d.issue_date ? fmtDate(d.issue_date) : ''}</span>` : '<span class="chip">scheduled</span>';
   el.innerHTML = `
     <div class="page-head"><div><h2>Numbers check</h2><div class="sub-title">Income and projects come only from the Invoicing tab. This page shows each figure the way every tab works it out, so you can see they agree.</div></div>
-      <div class="row"><button class="btn" id="chkRefresh">Re-check</button></div></div>
+      <div class="row"><button class="btn" id="chkRefresh">Re-check</button>${state.meta.ai_enabled ? `<button class="btn primary" id="chkClara">Have ${esc(clara)} clean it up</button>` : ''}</div></div>
     <div class="callout ${bad || high ? '' : 'ok'}" style="margin-bottom:14px">${bad || high
       ? `<b>${bad ? `${bad} figure${bad === 1 ? '' : 's'} disagree` : 'Every figure agrees'}${high ? ` · ${high} thing${high === 1 ? '' : 's'} to fix` : ''}.</b> Work down the list below – each item says what to do.`
       : `<b>Everything agrees.</b> ${c.counts.app_invoices} invoice${c.counts.app_invoices === 1 ? '' : 's'} in the Invoicing tab → ${c.counts.projects} project${c.counts.projects === 1 ? '' : 's'}.`}</div>
     <div class="grid g3">${c.comparisons.map((x) => `<div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(x.name)}</h3><span class="chip ${x.ok ? 'paid' : 'overdue'}">${x.ok ? 'agrees' : 'differs'}</span></div><p class="note">${esc(x.note)}</p>
       <div class="list">${x.values.map((v) => `<div class="li"><span>${esc(v.where)}${v.plus ? `<div class="meta">+ ${money(v.plus)} ${esc(v.plusLabel)}</div>` : ''}</span><b class="num">${money(v.v)}</b></div>`).join('')}</div></div>`).join('')}</div>
+    <details class="card rules-sum" style="margin-top:14px"><summary><b>Books rules in effect</b> <span class="note">· ${rr.rules.length} rules${rr.house_rules.length ? ` · ${rr.house_rules.length} house rule${rr.house_rules.length === 1 ? '' : 's'}` : ''}${rr.flags.length ? ` · ${rr.flags.length} flagged for ${esc(clara)}` : ''}</span></summary>
+      <ul class="prop-lines">${rr.rules.map((x) => `<li><b>${esc(x.label)}:</b> ${esc(x.text)}</li>`).join('')}${rr.house_rules.map((h) => `<li><b>House rule:</b> ${esc(h)}</li>`).join('')}</ul>
+      <p class="note">Change them in <button class="link" id="chkRules">Settings → Books rules</button>, or tell ${esc(clara)} how you want it.</p></details>
     <div class="card" style="margin-top:14px"><h3>To check or fix (${c.issues.length})</h3>
       ${c.issues.length ? `<div class="list">${c.issues.map((i, n) => `<div class="li chk-li"><div class="chk-txt"><span class="chip ${i.severity === 'high' ? 'overdue' : i.severity === 'medium' ? 'open' : ''}">${i.severity === 'high' ? 'fix' : i.severity === 'medium' ? 'check' : 'info'}</span> <b>${esc(i.title)}</b><div class="meta" style="white-space:normal">${esc(i.detail)}</div></div>
         <div class="row chk-acts">${i.tx_id ? `<button class="btn sm ghost" data-ctx="${i.tx_id}">Open</button><button class="btn sm danger ghost" data-cdel="${i.tx_id}">Delete</button>` : ''}
@@ -503,6 +507,11 @@ state.pages['fin-check'] = async function renderCheck() {
         : '<p class="note">No invoices in the Invoicing tab yet.</p>'}</div>`;
   wireGoTo(el);
   $('#chkRefresh').addEventListener('click', () => renderCheck());
+  $('#chkRules').addEventListener('click', () => { state.setSub = 'rules'; showTab('settings'); });
+  $('#chkClara')?.addEventListener('click', async () => {
+    Drawer.setAgent('financials'); Drawer.needsLoad = false; Drawer.toggle(true);
+    Drawer.chat.load().catch(() => {}).then(() => Drawer.chat.send('Go through the Numbers check and clean up my books. Ask me about anything that could go either way.'));
+  });
   $$('[data-ctx]', el).forEach((b) => b.addEventListener('click', async () => { const rows = await api(`/api/transactions?kind=income&limit=5000`); const t = rows.find((r) => r.id === Number(b.dataset.ctx)); if (t) txModal(t); }));
   $$('[data-cdel]', el).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Delete this ledger entry?')) return; await api(`/api/transactions/${b.dataset.cdel}`, { method: 'DELETE' }); toast('Deleted'); renderCheck(); }));
   $$('[data-cidel]', el).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Delete this invoice? Ledger entries stay.')) return; await api(`/api/invoices/${b.dataset.cidel}`, { method: 'DELETE' }); toast('Deleted'); renderCheck(); }));

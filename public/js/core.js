@@ -77,7 +77,9 @@ const AWAITING = 'Invoiced – Awaiting Payment';
 // The awaiting-payment category is managed by invoice sync, so it's only offered on rows that already use it.
 const catOptions = (kind, sel) => state.meta.categories.filter((c) => c.active && (!kind || c.kind === kind) && (c.name !== AWAITING || sel === AWAITING))
   .map((c) => `<option ${c.name === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+// With the "only invoices make jobs" rule, pickers list only jobs from invoices (plus whatever is already chosen).
 const jobOptions = (sel, blank = 'No job') => `<option value="">${blank}</option>` + state.meta.jobs
+  .filter((j) => (state.meta.rules || {}).jobs_source !== 'invoices_only' || j.from_invoices || String(j.id) === String(sel))
   .map((j) => `<option value="${j.id}" ${String(j.id) === String(sel) ? 'selected' : ''}>${esc(j.name)}${['complete', 'lost'].includes(j.status) ? ` (${j.status})` : ''}</option>`).join('');
 const workerOptions = (sel) => state.meta.workers.filter((w) => w.active).map((w) => `<option ${w.name === (sel || 'Me') ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
 const METHODS = ['check', 'cash', 'card', 'ach', 'zelle', 'venmo', 'other'];

@@ -30,13 +30,16 @@ state.pages.jobs = async function renderJobs() {
   const sub = state.jobsSub || 'jobs';
   const walt = agentInfo('jobs');
   const head = `<div class="page-head"><div><h2>Jobs</h2><div class="sub-title">Tag money, miles and hours to a job to see what it really made per hour.</div></div>
-    <div class="row">${sub === 'jobs' ? '<button class="btn" id="jobHours">Log hours</button><button class="btn primary" id="jobNew">New job</button>' : sub === 'crew' ? '<button class="btn primary" id="crewNew">Add person</button>' : ''}</div></div>
+    <div class="row">${sub === 'jobs' ? `<button class="btn" id="jobHours">Log hours</button>${(state.meta.rules || {}).jobs_source === 'invoices_only' ? '' : '<button class="btn primary" id="jobNew">New job</button>'}` : sub === 'crew' ? '<button class="btn primary" id="crewNew">Add person</button>' : ''}</div></div>
     ${subnav('jobsSub', [['jobs', 'Jobs'], ['estimates', 'Estimates'], ['crew', 'Crew & hours']], sub)}`;
   if (sub === 'estimates') return renderEstimates(el, head);
   if (sub === 'crew') return renderCrew(el, head);
-  const jobs = await api('/api/jobs');
+  let jobs = await api('/api/jobs');
   const active = jobs.filter((j) => j.status === 'active' && j.from_invoices);
   const others = jobs.filter((j) => !j.from_invoices);
+  // Rule "What counts as a job": invoices only → jobs made any other way stay out of the list (Numbers check shows them).
+  const invoicesOnly = (state.meta.rules || {}).jobs_source === 'invoices_only';
+  if (invoicesOnly) jobs = jobs.filter((j) => j.from_invoices);
   const done = jobs.filter((j) => j.status === 'complete' && j.margin !== null);
   el.innerHTML = `${head}
     <div class="kpis">
@@ -46,7 +49,7 @@ state.pages.jobs = async function renderJobs() {
       <div class="kpi"><div class="l">Unbilled materials</div><div class="v">${money0(jobs.reduce((a, j) => a + j.unbilled, 0))}</div><div class="s">incl. markup</div></div>
       <div class="kpi"><div class="l">Avg. margin (done)</div><div class="v">${pct(avg(done.map((j) => j.margin)))}</div><div class="s">${done.length} completed jobs</div></div>
     </div>
-    ${others.length ? `<div class="callout" style="margin-bottom:12px">${others.length} job${others.length === 1 ? ' isn\'t' : 's aren\'t'} from an invoice (made by hand, by an agent, or by an older version from an estimate). They don't count toward contracts, owed or still to bill. <button class="link" data-go-check>Review in the Numbers check</button></div>` : ''}
+    ${others.length ? `<div class="callout" style="margin-bottom:12px">${others.length} job${others.length === 1 ? ' isn\'t' : 's aren\'t'} from an invoice (made by hand, by an agent, or by an older version from an estimate). ${invoicesOnly ? 'Your books rules say only invoices make jobs, so they\'re hidden here and left out of every total.' : 'They don\'t count toward contracts, owed or still to bill.'} <button class="link" data-go-check>Review in the Numbers check</button></div>` : ''}
     <div class="filters"><select id="jStatus">${[['open', 'Open jobs'], ['all', 'All jobs'], ['lead', 'Leads'], ['estimating', 'Estimating'], ['active', 'Active'], ['complete', 'Complete'], ['lost', 'Lost']].map(([v, l]) => `<option value="${v}" ${(state.jobFilter || 'open') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div class="table-wrap"><table>
       <thead><tr><th>Job</th><th>Status</th><th class="n">Contract</th><th class="n">Collected</th><th class="n">Owed</th><th class="n hide-sm">To bill</th><th class="n hide-sm">Costs</th><th class="n">Profit</th><th class="n hide-sm">Your hrs</th><th class="n">$/hr</th><th></th></tr></thead>
@@ -64,7 +67,7 @@ state.pages.jobs = async function renderJobs() {
         <td class="actions"><button class="btn sm ghost" data-je="${j.id}">Edit</button></td></tr>`;
       }).join('') || '<tr><td colspan="11" class="empty">No jobs here yet.</td></tr>'}</tbody></table></div>`;
   wireSubnav(el, 'jobsSub', renderJobs);
-  $('#jobNew').addEventListener('click', () => jobModal());
+  $('#jobNew')?.addEventListener('click', () => jobModal());
   $('#jobHours').addEventListener('click', () => hoursModal());
   $('#jStatus').addEventListener('change', (e) => { state.jobFilter = e.target.value; renderJobs(); });
   $('[data-go-check]', el)?.addEventListener('click', () => { state.sub = 'check'; showTab('financials'); });
@@ -505,11 +508,46 @@ state.pages.settings = async function renderSettings() {
   await loadMeta();
   const el = $('#tab-settings');
   const sub = state.setSub || 'agents';
-  el.innerHTML = `<div class="page-head"><h2>Settings</h2></div>${subnav('setSub', [['agents', 'Agents & knowledge'], ['business', 'Business'], ['connections', 'Connections'], ['security', 'Security'], ['categories', 'Categories'], ['data', 'Data']], sub)}<div id="setBody"></div>`;
+  el.innerHTML = `<div class="page-head"><h2>Settings</h2></div>${subnav('setSub', [['agents', 'Agents & knowledge'], ['rules', 'Books rules'], ['business', 'Business'], ['connections', 'Connections'], ['security', 'Security'], ['categories', 'Categories'], ['data', 'Data']], sub)}<div id="setBody"></div>`;
   wireSubnav(el, 'setSub', renderSettings);
   const body = $('#setBody');
-  ({ agents: setAgents, business: setBusiness, connections: setConnections, security: setSecurity, categories: setCategories, data: setData }[sub])(body);
+  ({ agents: setAgents, rules: setRules, business: setBusiness, connections: setConnections, security: setSecurity, categories: setCategories, data: setData }[sub])(body);
 };
+// Books rules: how invoices become jobs and numbers, everywhere in the Cockpit. Clara can propose changes too.
+async function setRules(body) {
+  const r = await api('/api/rules');
+  const clara = agentInfo('financials').name;
+  body.innerHTML = `
+    <div class="callout" style="margin-bottom:14px">These rules decide how your invoices turn into jobs, money owed and income – on every tab, for every agent. Change one here, or just tell ${esc(clara)} how you want it ("only invoices make a job") and approve her card. Every number is rebuilt from your invoices when a rule changes.</div>
+    <div class="grid g2">
+      <div class="card"><h3>Rules</h3><div class="rules-list">${r.rules.map((x) => `<div class="rule"><label><span class="rule-l">${esc(x.label)}</span>
+        ${x.choices.number ? `<span class="row"><input type="number" class="num rule-in" data-rule="${x.key}" value="${x.value}" min="${x.choices.number.min}" max="${x.choices.number.max}" style="width:90px"> ${esc(x.choices.number.unit)}</span>`
+          : ''}</label>${x.choices.number ? '' : `<div class="rule-opts">${Object.entries(x.choices).map(([v, t]) => `<label class="rule-opt"><input type="radio" class="rule-in" name="rule_${x.key}" data-rule="${x.key}" value="${v}" ${v === x.value ? 'checked' : ''}><span>${esc(t)}</span></label>`).join('')}</div>`}</div>`).join('')}</div>
+        <div class="foot" style="margin-top:12px"><span class="note" id="ruleDirty"></span><button class="btn primary" id="ruleSave" disabled>Save rules</button></div></div>
+      <div>
+        <div class="card"><h3>House rules</h3><p class="note">Your own conventions in plain words. Every agent follows them; ${esc(clara)} adds them when you tell her how you want things done.</p>
+          ${r.house_rules.length ? `<ol class="house">${r.house_rules.map((h, i) => `<li><span>${esc(h)}</span><button class="btn sm ghost danger" data-hr="${i + 1}" title="Remove">✕</button></li>`).join('')}</ol>` : '<p class="note">None yet.</p>'}
+          <form id="hrForm" class="row" style="margin-top:10px"><input name="t" placeholder="e.g. Deposits are always draw 1 of the job" class="grow" maxlength="400"><button class="btn">Add</button></form></div>
+        <div class="card" style="margin-top:14px"><h3>Waiting for ${esc(clara)} (${r.flags.length})</h3>
+          ${r.flags.length ? `<div class="list">${r.flags.map((f) => `<div class="li"><div>${esc(f.text)}<div class="meta">from ${esc(agentInfo(f.agent)?.name || f.agent)} · ${fmtDate(String(f.created_at).slice(0, 10))}</div></div><button class="btn sm ghost" data-fres="${f.id}">Done</button></div>`).join('')}</div>`
+            : '<p class="note">Nothing flagged. When another agent spots a books problem, it lands here for her.</p>'}</div>
+      </div>
+    </div>`;
+  const ins = $$('.rule-in', body);
+  const orig = Object.fromEntries(r.rules.map((x) => [x.key, String(x.value)]));
+  const changed = () => Object.fromEntries(ins.filter((i) => (i.type !== 'radio' || i.checked) && String(i.value) !== orig[i.dataset.rule]).map((i) => [i.dataset.rule, i.type === 'number' ? Number(i.value) : i.value]));
+  ins.forEach((i) => i.addEventListener('change', () => { const n = Object.keys(changed()).length; $('#ruleSave').disabled = !n; $('#ruleDirty').textContent = n ? `${n} change${n === 1 ? '' : 's'} – saving rebuilds every number` : ''; }));
+  $('#ruleSave').addEventListener('click', async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Rebuilding…';
+    try { await api('/api/rules', { method: 'PUT', body: { changes: changed() } }); toast('Rules saved – every number rebuilt'); loadMeta().catch(() => {}); setRules(body); } catch (err) { fail(err); e.target.disabled = false; e.target.textContent = 'Save rules'; }
+  });
+  $('#hrForm').addEventListener('submit', async (e) => {
+    e.preventDefault(); const t = e.target.t.value.trim(); if (!t) return;
+    try { await api('/api/rules', { method: 'PUT', body: { add_house_rules: [t] } }); setRules(body); } catch (err) { fail(err); }
+  });
+  $$('[data-hr]', body).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Remove this house rule?')) return; await api('/api/rules', { method: 'PUT', body: { remove_house_rules: [Number(b.dataset.hr)] } }); setRules(body); }));
+  $$('[data-fres]', body).forEach((b) => b.addEventListener('click', async () => { await api(`/api/rules/flags/${b.dataset.fres}/resolve`, { method: 'POST' }); setRules(body); }));
+}
 async function setAgents(body) {
   const [docs, facts] = await Promise.all([api('/api/docs'), api('/api/facts')]);
   const ids = ['home', 'financials', 'taxes', 'jobs', 'daily'];

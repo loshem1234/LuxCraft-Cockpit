@@ -1,7 +1,7 @@
 /* LuxCraft Cockpit – agents: chat panels, approvals, voice */
 const SUGGEST = {
   home: ['What needs my attention today?', "How's cash this month?", 'Summarize my week'],
-  financials: ['Categorize my new bank rows', "What materials haven't I billed?", 'Who owes me money?', 'Log an expense: '],
+  financials: ['Go through the Numbers check and clean up my books', 'Make it a rule: ', 'Fix this invoice: ', 'Who owes me money?', 'Log an expense: '],
   taxes: ['Am I on track with quarterly payments?', 'Should I buy the truck and trailer this year?', 'Does my garage qualify as a home office?', 'Which subs need a 1099?'],
   jobs: ['Help me price a bathroom remodel', 'Which jobs pay best per hour?', 'Is any job running over budget?', 'Which estimates should I follow up on?'],
   daily: ["Here's my plan for today: ", 'Yesterday went: ', 'Plan Jake\'s day: ', 'How many hours did I work this week?'],
@@ -39,10 +39,21 @@ const Voice = {
 };
 
 // ---------- proposals ----------
+// Books changes (Clara) show what will change, line by line, before → after.
+const BOOKS_ACTIONS = { propose_rule_change: 'Change the books rules', propose_invoice_edit: 'Edit an invoice', propose_data_fix: 'Clean up the books' };
+function proposalBody(p) {
+  if (!BOOKS_ACTIONS[p.action]) return `<div class="prop-sum">${esc(p.summary)}</div>`;
+  const lines = String(p.summary).split('\n');
+  const why = lines.find((l) => l.startsWith('Why: '));
+  const what = lines.filter((l) => l !== why);
+  // An invoice edit's first line names the invoice.
+  const head = p.action === 'propose_invoice_edit' && /^Invoice /.test(what[0] || '') ? what.shift() : '';
+  return `<div class="prop-sum"><b>${BOOKS_ACTIONS[p.action]}${head ? ` · ${esc(head.replace(/^Invoice /, ''))}` : ''}</b><ul class="prop-lines">${what.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>${why ? `<div class="note">${esc(why)}</div>` : ''}</div>`;
+}
 function proposalHtml(p) {
   const done = p.status !== 'pending';
-  return `<div class="prop ${p.status}" data-pid="${p.id}">
-    <div class="prop-sum">${esc(p.summary)}</div>
+  return `<div class="prop ${p.status}${BOOKS_ACTIONS[p.action] ? ' books' : ''}" data-pid="${p.id}">
+    ${proposalBody(p)}
     ${done ? `<span class="chip ${p.status === 'approved' ? 'paid' : p.status === 'failed' ? 'overdue' : ''}">${p.status === 'approved' ? 'Approved' : p.status === 'failed' ? `Failed: ${esc(p.error || '')}` : 'Declined'}</span>`
     : `<div class="prop-btns"><button class="btn sm primary" data-decide="approve">Approve</button><button class="btn sm ghost" data-decide="reject">Decline</button></div>`}
   </div>`;
@@ -53,6 +64,8 @@ async function decideProposals(ids, approve) {
   if (failed.length) toast(`Couldn't apply: ${failed[0].error}`, true);
   else toast(approve ? (ids.length > 1 ? `${ids.length} changes approved` : 'Approved') : 'Declined');
   await loadMeta();
+  // An approved invoice edit or rule change rewrote the invoices: reload the Invoicing tab so it shows them.
+  if (out.some((p) => p.status === 'approved' && BOOKS_ACTIONS[p.action])) { const f = $('#invoiceFrame'); if (f && f.getAttribute('src')) f.setAttribute('src', '/invoice-app/?r=' + Date.now()); }
   if (state.tab !== 'productivity') render(); else if (window.refreshTodayCard) refreshTodayCard();
   return out;
 }
