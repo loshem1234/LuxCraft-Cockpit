@@ -237,11 +237,13 @@ app.post('/api/jobs', wrap(async (req, res) => {
 app.put('/api/jobs/:id', wrap(async (req, res) => res.json(await S.upsertJob({ ...req.body, id: Number(req.params.id) }))));
 app.delete('/api/jobs/:id', wrap(async (req, res) => { await q('DELETE FROM jobs WHERE id=$1', [req.params.id]); res.json({ ok: true }); }));
 app.get('/api/workers', wrap(async (req, res) => res.json((await q('SELECT * FROM workers ORDER BY id')).rows)));
+// Earned (hours × rate), paid (expenses with them as payee) and still due, per crew member.
+app.get('/api/workers/balances', wrap(async (req, res) => res.json(await S.crewBalances(req.query.name || null))));
 app.post('/api/workers', wrap(async (req, res) => {
   const b = req.body;
-  const { rows } = await q(`INSERT INTO workers (name, role, rate, active) VALUES ($1,$2,$3,COALESCE($4,true))
-    ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, rate=EXCLUDED.rate, active=EXCLUDED.active RETURNING *`,
-  [String(b.name).trim(), b.role === 'sub' ? 'sub' : 'helper', b.rate || null, b.active ?? true]);
+  const { rows } = await q(`INSERT INTO workers (name, role, rate, active, pay_basis) VALUES ($1,$2,$3,COALESCE($4,true),$5)
+    ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, rate=EXCLUDED.rate, active=EXCLUDED.active, pay_basis=EXCLUDED.pay_basis RETURNING *`,
+  [String(b.name).trim(), b.role === 'sub' ? 'sub' : 'helper', b.rate || null, b.active ?? true, b.pay_basis === 'day' ? 'day' : 'hour']);
   res.json(rows[0]);
 }));
 app.get('/api/time', wrap(async (req, res) => res.json(await S.listTimeEntries(req.query))));

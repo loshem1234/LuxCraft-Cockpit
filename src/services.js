@@ -268,6 +268,42 @@ async function setWeekHours(worker, monday, entries) {
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
   return { worker, from: monday, to: sunday, entries: rows.length, hours: Math.round(rows.reduce((a, r) => a + r.hours, 0) * 100) / 100 };
 }
+// What each crew member has earned (from logged hours), been paid (expenses logged to them as payee) and is
+// still owed. Pay comes from their rate – per hour, or per day worked – unless an hours entry has its own $ amount.
+async function crewBalances(name = null) {
+  const workers = (await q(`SELECT * FROM workers WHERE name<>'Me' AND ($1::text IS NULL OR name=$1) ORDER BY id`, [name])).rows;
+  if (!workers.length) return [];
+  const names = workers.map((w) => w.name);
+  const entries = (await q(`SELECT worker, date, hours::float AS hours, est_earned::float AS est FROM time_entries WHERE worker = ANY($1)`, [names])).rows;
+  const pays = (await q(`SELECT id, date, amount::float AS amount, party, category, method, check_no, memo FROM transactions
+     WHERE kind='expense' AND lower(trim(party)) = ANY($1) ORDER BY date DESC, id DESC`, [names.map((n) => n.trim().toLowerCase())])).rows;
+  const weekStart = (() => { const d = new Date(todayISO() + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); })();
+  const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
+  return workers.map((w) => {
+    const rate = w.rate == null ? null : Number(w.rate);
+    const mine = entries.filter((e) => e.worker === w.name);
+    const days = {}; mine.forEach((e) => { (days[iso(e.date)] ||= []).push(e); });
+    let earned = 0; let unpriced = 0; let weekEarned = 0;
+    for (const [d, list] of Object.entries(days)) {
+      const dayHours = list.reduce((a, e) => a + e.hours, 0);
+      let dayPay = 0;
+      for (const e of list) {
+        let pay;
+        if (e.est != null) pay = e.est;
+        else if (rate == null) { unpriced += e.hours; pay = 0; }
+        else pay = w.pay_basis === 'day' ? rate * (dayHours ? e.hours / dayHours : 0) : rate * e.hours;
+        dayPay += pay;
+      }
+      earned += dayPay; if (d >= weekStart) weekEarned += dayPay;
+    }
+    const mp = pays.filter((p) => p.party.trim().toLowerCase() === w.name.trim().toLowerCase());
+    const paid = mp.reduce((a, p) => a + p.amount, 0);
+    return { name: w.name, role: w.role, rate, pay_basis: w.pay_basis, active: w.active,
+      hours: round2(mine.reduce((a, e) => a + e.hours, 0)), days: Object.keys(days).length,
+      earned: round2(earned), paid: round2(paid), due: round2(earned - paid), week_earned: round2(weekEarned), unpriced_hours: round2(unpriced),
+      payments: mp.slice(0, 25).map((p) => ({ ...p, date: iso(p.date) })) };
+  });
+}
 // Hours per person per week, for the "previous weeks" list.
 async function weeklyHours(weeks = 12) {
   const { rows } = await q(`SELECT to_char(date_trunc('week', date), 'YYYY-MM-DD') AS week, worker, SUM(hours)::float AS hours, COUNT(DISTINCT date)::int AS days
@@ -534,6 +570,6 @@ async function overview() {
 
 module.exports = {
   AWAITING, round2, todayISO, mileageRateFor, addTransaction, updateTransaction, addSplit, listTransactions, listInvoices, upsertInvoice,
-  listEstimates, listJobs, upsertJob, addMileage, listMileage, addTimeEntries, listTimeEntries, setWeekHours, weeklyHours, taxSummary, estimateTaxes,
+  listEstimates, listJobs, upsertJob, addMileage, listMileage, addTimeEntries, listTimeEntries, setWeekHours, weeklyHours, crewBalances, taxSummary, estimateTaxes,
   analytics, periodSummary, overview, LINE_LABELS,
 };

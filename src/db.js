@@ -186,6 +186,8 @@ CREATE TABLE IF NOT EXISTS bank_rows (
 
 -- Contract draw schedules and invoice detail (synced from the invoice app)
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS draws JSONB;
+-- How a crew member's pay is worked out from their hours: by the hour or by the day (rate is per hour or per day).
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS pay_basis TEXT NOT NULL DEFAULT 'hour';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS change_orders NUMERIC(12,2);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS draws_synced_at TIMESTAMPTZ;
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS draw_no INT;
