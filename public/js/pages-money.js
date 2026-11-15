@@ -151,7 +151,7 @@ state.pages['fin-ledger'] = async function renderLedger() {
   if ($('#markBilled')) $('#markBilled').addEventListener('click', async () => { await api('/api/transactions/mark-billed', { method: 'POST', body: { ids: rows.map((r) => r.id) } }); toast('Marked billed'); renderLedger(); });
   $$('[data-edit]', el).forEach((b) => b.addEventListener('click', () => txModal(rows.find((r) => r.id === Number(b.dataset.edit)))));
   wireGoTo(el);
-  $('#partyList').innerHTML = [...new Set(rows.map((r) => r.party).filter(Boolean))].slice(0, 60).map((p) => `<option value="${esc(p)}">`).join('');
+  $('#partyList').innerHTML = [...new Set([...state.meta.workers.filter((w) => w.name !== 'Me').map((w) => w.name), ...rows.map((r) => r.party).filter(Boolean)])].slice(0, 60).map((p) => `<option value="${esc(p)}">`).join('');
 };
 
 // Add/edit transaction, with split mode, reimbursable materials and sales tax.
@@ -176,7 +176,7 @@ function txModal(t = {}, opts = {}) {
       <label>Date<input type="date" name="date" value="${t.date || today()}" required></label>
       <label>${split ? 'Receipt total' : 'Amount'}<input type="number" name="${split ? 'total' : 'amount'}" step="0.01" min="0.01" value="${t.amount ?? ''}" inputmode="decimal" ${split ? '' : 'required'}></label>
       ${split ? '' : `<label>Category<select name="category">${catOptions(kind, t.category)}</select></label><label>Job<select name="job_id">${jobOptions(t.job_id)}</select></label>`}
-      <label>${kind === 'income' ? 'Paid by' : 'Vendor / payee'}<input name="party" value="${esc(t.party || '')}"></label>
+      <label>${kind === 'income' ? 'Paid by' : 'Vendor / payee'}<input name="party" value="${esc(t.party || '')}" ${kind === 'expense' ? 'list="crewPayees"' : ''}>${kind === 'expense' ? `<datalist id="crewPayees">${state.meta.workers.filter((w) => w.name !== 'Me').map((w) => `<option value="${esc(w.name)}">`).join('')}</datalist><span class="note" id="crewDue"></span>` : ''}</label>
       <label>Method<select name="method">${methodOptions(t.method)}</select></label>
       <label>Check #<input name="check_no" value="${esc(t.check_no || '')}"></label>
       ${kind === 'income' && isEdit && t.invoice_no ? `<label>Invoice #<input name="invoice_no" value="${esc(t.invoice_no || '')}"></label>` : ''}
@@ -206,6 +206,21 @@ function txModal(t = {}, opts = {}) {
       $('[name=total]', m).addEventListener('input', left); wire(); left();
     }
     $('#txToSplit')?.addEventListener('click', () => { const cur = formData($('#txForm')); txModal({ ...t, ...cur, kind }, { split: true }); });
+    // Paying a crew member: show what they're still owed as soon as their name is the payee.
+    const due = $('#crewDue'); const payee = $('[name=party]', m);
+    if (due && payee) {
+      let bals = null;
+      const show = async () => {
+        const n = payee.value.trim().toLowerCase();
+        const w = state.meta.workers.find((x) => x.name !== 'Me' && x.name.toLowerCase() === n);
+        if (!w) { due.textContent = ''; return; }
+        bals ||= await api('/api/workers/balances').catch(() => []);
+        const b = bals.find((x) => x.name === w.name); if (!b) return;
+        const after = isEdit ? b.due : b.due - Number(($('[name=amount]', m) || $('[name=total]', m) || {}).value || 0);
+        due.textContent = `${w.name}: earned ${money(b.earned)} · paid ${money(b.paid)} · ${b.due >= 0 ? `${money(b.due)} still due` : `${money(-b.due)} paid ahead`}${!isEdit ? ` → ${after >= 0 ? `${money(after)} due after this` : `${money(-after)} ahead after this`}` : ''}`;
+      };
+      payee.addEventListener('input', show); $('[name=amount]', m)?.addEventListener('input', show); show();
+    }
   });
   $('#txSave').addEventListener('click', async () => {
     const f = $('#txForm'); if (!f.reportValidity()) return;

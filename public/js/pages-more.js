@@ -148,8 +148,10 @@ const personName = (n) => (n === 'Me' ? 'You (Loshem)' : n);
 
 async function renderCrew(el, head) {
   const cs = (state.crew ||= { worker: 'Me', monday: mondayOf(today()) });
-  const [workers, weeks, entries] = await Promise.all([api('/api/workers'), api('/api/time/weeks?weeks=26'),
-    api(`/api/time?worker=${encodeURIComponent(cs.worker)}&from=${cs.monday}&to=${addDays(cs.monday, 6)}`)]);
+  const [workers, weeks, entries, balances] = await Promise.all([api('/api/workers'), api('/api/time/weeks?weeks=26'),
+    api(`/api/time?worker=${encodeURIComponent(cs.worker)}&from=${cs.monday}&to=${addDays(cs.monday, 6)}`), api('/api/workers/balances')]);
+  const bal = balances.find((b) => b.name === cs.worker) || null;
+  const rateText = (w) => (w.rate ? `${money(w.rate)}/${w.pay_basis === 'day' ? 'day' : 'hr'}` : '');
   if (!workers.some((w) => w.name === cs.worker)) cs.worker = 'Me';
   const person = workers.find((w) => w.name === cs.worker) || { name: 'Me', role: 'owner' };
   const isMe = person.name === 'Me';
@@ -174,15 +176,22 @@ async function renderCrew(el, head) {
 
   el.innerHTML = `${head}
     <div class="ts-people" role="tablist">${people.map((w) => { const h = weekOf(w.name, cs.monday); return `<button class="ts-person${w.name === cs.worker ? ' on' : ''}" data-person="${esc(w.name)}" role="tab" aria-selected="${w.name === cs.worker}">
-      <b>${esc(personName(w.name))}</b><span>${h ? `${h.hours} hrs` : 'no hours'} this week</span></button>`; }).join('')}
+      <b>${esc(personName(w.name))}</b><span>${h ? `${h.hours} hrs` : 'no hours'} this week</span>${(() => { const b = balances.find((x) => x.name === w.name); return b && Math.abs(b.due) >= 0.01 ? `<span class="${b.due > 0 ? 'ts-owe' : ''}">${b.due > 0 ? `${money0(b.due)} due` : `${money0(-b.due)} paid ahead`}</span>` : ''; })()}</button>`; }).join('')}
       <button class="ts-person add" id="crewNew2">+ Add person</button></div>
     <div class="grid ts-grid">
       <div class="card">
         <div class="ts-head">
           <div class="row"><button class="btn sm" id="tsPrev" aria-label="Previous week">‹</button><div class="ts-week"><b>${weekLabel(cs.monday)}</b><span class="note">${cs.monday === thisMon ? 'This week' : cs.monday === addDays(thisMon, -7) ? 'Last week' : cs.monday > thisMon ? 'Upcoming' : `${Math.round((Date.parse(thisMon) - Date.parse(cs.monday)) / 604800000)} weeks ago`}</span></div><button class="btn sm" id="tsNext" aria-label="Next week">›</button>
             ${cs.monday !== thisMon ? '<button class="btn sm ghost" id="tsToday">This week</button>' : ''}<input type="date" id="tsJump" class="ts-jump" value="${cs.monday}" title="Jump to any week" aria-label="Jump to week"></div>
-          <div class="row"><b>${esc(personName(person.name))}</b>${person.role !== 'owner' ? ` <span class="chip">${person.role}</span>` : ''}${person.rate ? ` <span class="note">${money(person.rate)}/hr</span>` : ''}${!isMe ? `<button class="btn sm ghost" id="tsEditP">Edit</button>` : ''}</div>
+          <div class="row"><b>${esc(personName(person.name))}</b>${person.role !== 'owner' ? ` <span class="chip">${person.role}</span>` : ''}${person.rate ? ` <span class="note">${rateText(person)}</span>` : ''}${!isMe ? `<button class="btn sm ghost" id="tsEditP">Edit</button>` : ''}</div>
         </div>
+        ${bal ? `<div class="ts-bal">
+          <div><span class="l">Earned</span><b class="num">${money(bal.earned)}</b><span class="note">${bal.hours} hrs · ${bal.days} day${bal.days === 1 ? '' : 's'}${bal.rate ? ` at ${rateText(bal)}` : ''}</span></div>
+          <div><span class="l">Paid</span><b class="num">${money(bal.paid)}</b><span class="note">${bal.payments.length ? `last ${fmtDate(bal.payments[0].date)}` : 'no payments yet'}</span></div>
+          <div class="${bal.due > 0.004 ? 'owe' : ''}"><span class="l">${bal.due < -0.004 ? 'Paid ahead' : 'Still due'}</span><b class="num">${money(Math.abs(bal.due))}</b><span class="note">${bal.week_earned ? `${money(bal.week_earned)} earned this week` : '&nbsp;'}</span></div>
+          <button class="btn primary" id="tsPay">Pay ${esc(person.name)}${bal.due > 0.004 ? ` ${money0(bal.due)}` : ''}</button>
+        </div>
+        ${!bal.rate && bal.hours ? `<div class="callout" style="margin-bottom:12px">${esc(person.name)} has no pay rate yet, so the ${bal.unpriced_hours} hours logged aren't counted in Earned. <button class="link" id="tsSetRate">Set a rate</button></div>` : ''}` : ''}
         <div class="ts-fill"><span class="note">Quick fill empty days:</span>
           <label class="ts-chk"><input type="checkbox" class="ts-fd" value="0" checked>M</label><label class="ts-chk"><input type="checkbox" class="ts-fd" value="1" checked>T</label><label class="ts-chk"><input type="checkbox" class="ts-fd" value="2" checked>W</label><label class="ts-chk"><input type="checkbox" class="ts-fd" value="3" checked>T</label><label class="ts-chk"><input type="checkbox" class="ts-fd" value="4" checked>F</label><label class="ts-chk"><input type="checkbox" class="ts-fd" value="5">S</label><label class="ts-chk"><input type="checkbox" class="ts-fd" value="6">S</label>
           <input type="number" id="tsFillH" class="num" value="${person.role === 'owner' ? 8 : 8}" min="0" max="24" step="0.25" aria-label="Hours per day" style="width:70px"> hrs on
@@ -196,8 +205,11 @@ async function renderCrew(el, head) {
         <p class="note" style="margin-top:8px">Saving replaces ${isMe ? 'your' : 'their'} hours for this week with exactly what's shown. Tab or Enter moves to the next day. ${isMe ? '' : 'Pay helpers and subs as Subcontractors expenses so the 1099 tracker counts it.'}</p>
       </div>
       <div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(personName(person.name))} · past weeks</h3><a class="btn sm" href="/api/export/time.csv?year=${today().slice(0, 4)}">Export</a></div>
-        ${myWeeks.length ? `<div class="list ts-weeks">${myWeeks.map((w) => `<button class="li ts-wk${w.week === cs.monday ? ' on' : ''}" data-week="${w.week}"><span>${weekLabel(w.week)}</span><span class="num"><b>${w.hours}</b> hrs · ${w.days} day${w.days === 1 ? '' : 's'}${person.rate ? ` · ${money0(w.hours * person.rate)}` : ''}</span></button>`).join('')}</div>`
+        ${myWeeks.length ? `<div class="list ts-weeks">${myWeeks.map((w) => `<button class="li ts-wk${w.week === cs.monday ? ' on' : ''}" data-week="${w.week}"><span>${weekLabel(w.week)}</span><span class="num"><b>${w.hours}</b> hrs · ${w.days} day${w.days === 1 ? '' : 's'}${person.rate && !isMe ? ` · ${money0(person.pay_basis === 'day' ? w.days * person.rate : w.hours * person.rate)}` : ''}</span></button>`).join('')}</div>`
           : '<p class="note">No hours in the last 6 months yet.</p>'}
+        ${bal ? `<h3 style="margin-top:18px">Payments to ${esc(person.name)}</h3>
+          ${bal.payments.length ? `<div class="list">${bal.payments.slice(0, 10).map((p) => `<button class="li ts-payrow" data-tx="${p.id}"><span>${fmtDate(p.date)}<span class="meta">${esc([p.method, p.check_no ? 'Ck ' + p.check_no : '', p.category !== 'Subcontractors' ? p.category : ''].filter(Boolean).join(' · '))}</span></span><b class="num">${money(p.amount)}</b></button>`).join('')}</div>${bal.payments.length > 10 ? `<p class="note">${bal.payments.length - 10} more in the Ledger.</p>` : ''}`
+            : `<p class="note">None yet. Pay with the button on the left, or log an expense with "${esc(person.name)}" as the payee.</p>`}` : ''}
         <h3 style="margin-top:18px">Everyone · ${weekLabel(cs.monday)}</h3>
         <div class="list">${people.map((w) => { const h = weekOf(w.name, cs.monday); return `<div class="li"><span>${esc(personName(w.name))}</span><span class="num">${h ? `<b>${h.hours}</b> hrs · ${h.days} day${h.days === 1 ? '' : 's'}` : '—'}</span></div>`; }).join('')}</div>
       </div>
@@ -215,7 +227,7 @@ async function renderCrew(el, head) {
     rows.forEach((x) => { const h = Number(x.hours) || 0; if (h > 0) { tot += h; daysWorked.add(x.date); perDay[x.date] = (perDay[x.date] || 0) + h; } earned += Number(x.est_earned) || 0; if (h < 0) bad = 'Hours can\'t be negative'; });
     Object.entries(perDay).forEach(([d, h]) => { if (h > 24) bad = `${fmtDate(d)} has more than 24 hours`; });
     $$('.ts-row', rowsEl).forEach((r) => r.classList.toggle('ts-has', (perDay[r.dataset.date] || 0) > 0));
-    $('#tsTotal').innerHTML = `<b class="num">${Math.round(tot * 100) / 100}</b> hrs · ${daysWorked.size} day${daysWorked.size === 1 ? '' : 's'}${person.rate ? ` · pay ≈ <b class="num">${money(tot * person.rate)}</b>` : ''}${isMe && earned ? ` · est. made <b class="num">${money(earned)}</b>` : ''}${bad ? ` · <span style="color:var(--bad)">${esc(bad)}</span>` : ''}`;
+    $('#tsTotal').innerHTML = `<b class="num">${Math.round(tot * 100) / 100}</b> hrs · ${daysWorked.size} day${daysWorked.size === 1 ? '' : 's'}${person.rate && !isMe ? ` · pay ≈ <b class="num">${money(person.pay_basis === 'day' ? daysWorked.size * person.rate : tot * person.rate)}</b>` : ''}${isMe && earned ? ` · est. made <b class="num">${money(earned)}</b>` : ''}${bad ? ` · <span style="color:var(--bad)">${esc(bad)}</span>` : ''}`;
     const d = dirty();
     $('#tsSave').disabled = !d || !!bad; $('#tsUndo').disabled = !d; $('#tsDirty').textContent = d ? 'Unsaved changes' : '';
   };
@@ -288,10 +300,20 @@ async function renderCrew(el, head) {
     } catch (e) { fail(e); }
   });
   update();
+  // Paying a crew member is an expense with them as the payee (Subcontractors, so the 1099 tracker counts it).
+  $('#tsPay')?.addEventListener('click', () => {
+    if (dirty() && !confirm('You have unsaved hours for this week. Leave them unsaved and record the payment?')) return;
+    txModal({ kind: 'expense', category: 'Subcontractors', party: person.name, amount: bal.due > 0.004 ? bal.due : '', date: today(), method: 'check', memo: `Pay – ${person.name}` });
+  });
+  $$('.ts-payrow', el).forEach((b) => b.addEventListener('click', async () => {
+    const t = (await api(`/api/transactions?kind=expense&limit=5000`)).find((x) => x.id === Number(b.dataset.tx)); if (t) txModal(t);
+  }));
+  $('#tsSetRate')?.addEventListener('click', () => edit(person));
 
   const edit = (w = {}) => openModal(`<h2>${w.id ? 'Edit' : 'Add'} crew member</h2><form id="wForm" class="form-grid"><label class="wide">Name<input name="name" value="${esc(w.name || '')}" required ${w.id ? 'readonly' : ''}></label>
     <label>Role<select name="role"><option value="helper" ${w.role !== 'sub' ? 'selected' : ''}>Helper</option><option value="sub" ${w.role === 'sub' ? 'selected' : ''}>Subcontractor</option></select></label>
-    <label>Pay rate $/hr<input type="number" step="0.5" name="rate" value="${w.rate ?? ''}"></label><label class="check-label"><input type="checkbox" name="active" ${w.active !== false ? 'checked' : ''}> Active</label></form>
+    <label>Paid by<select name="pay_basis"><option value="hour" ${w.pay_basis !== 'day' ? 'selected' : ''}>The hour</option><option value="day" ${w.pay_basis === 'day' ? 'selected' : ''}>The day</option></select></label>
+    <label>Pay rate $<input type="number" step="0.5" min="0" name="rate" value="${w.rate ?? ''}" placeholder="per hour or per day"></label><label class="check-label"><input type="checkbox" name="active" ${w.active !== false ? 'checked' : ''}> Active</label></form>
     <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn primary" id="wSave">Save</button></div>`, () => $('#wSave').addEventListener('click', async () => {
     const f = $('#wForm'); if (!f.reportValidity()) return;
     try { const body = formData(f); await api('/api/workers', { method: 'POST', body }); closeModal(); if (!w.id) cs.worker = body.name.trim(); loadMeta().catch(() => {}); renderCrew(el, head); } catch (e) { fail(e); }
